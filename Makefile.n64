@@ -1,0 +1,66 @@
+# Apotris N64 port (libdragon). Build with: make -f Makefile.n64
+V = 1
+SOURCE_DIR = .
+BUILD_DIR = build
+include $(N64_INST)/include/n64.mk
+
+NAME = apotris
+
+SRC_CPP = \
+	source/audio_files.cpp source/blockEngine.cpp source/bot.cpp \
+	source/descriptions.cpp source/game.cpp source/main.cpp \
+	source/matchmakingQueue.cpp source/menuSystem.cpp source/menus.cpp \
+	source/multiplayer.cpp source/multiplayerClasses.cpp source/music.cpp \
+	source/prng.cpp source/rumblePatterns.cpp source/saving.cpp \
+	source/scenario.cpp source/scene.cpp source/screenAudio.cpp \
+	source/screenColorEditor.cpp source/screenControls.cpp \
+	source/screenCredits.cpp source/screenException.cpp \
+	source/screenGraphics.cpp source/screenHandling.cpp source/screenLinks.cpp \
+	source/screenMultiplayerResults.cpp source/screenPlayOptions.cpp \
+	source/screenSkinEditor.cpp source/screenTitle.cpp source/skinFile.cpp \
+	source/sprites.cpp source/tetromino.cpp source/text.cpp \
+	source/n64/liba_n64.cpp source/n64/ppu.cpp
+SRC_C = source/xoshiro128plusplus.c
+
+# Binary assets converted by tools/bin2s.py into gen/*_bin.{S,h}
+DATA_BINS = $(wildcard data/*.bin)
+GEN_H = $(patsubst data/%.bin,gen/%_bin.h,$(DATA_BINS))
+GEN_S = $(patsubst data/%.bin,gen/%_bin.S,$(DATA_BINS))
+
+OBJS = $(SRC_CPP:%.cpp=$(BUILD_DIR)/%.o) $(SRC_C:%.c=$(BUILD_DIR)/%.o) \
+	$(GEN_S:%.S=$(BUILD_DIR)/%.o)
+
+N64_CXXFLAGS += -DAPOTRIS_N64 -Iinclude/n64/compat -Iinclude -Idata -Igen -w -fno-exceptions
+N64_CFLAGS += -DAPOTRIS_N64 -Iinclude -Igen -w
+N64_ASFLAGS += -DAPOTRIS_N64
+
+all: $(NAME).z64
+
+$(OBJS): | gen/version.h $(GEN_H)
+
+gen/version.h: include/version.h.in
+	@mkdir -p gen
+	sed 's/@version@/4.2.0-n64/' $< > $@
+
+# GBA assets are little-endian, swapped to the N64's byte order first
+$(BUILD_DIR)/n64data/%.bin: data/%.bin tools/n64_swap.py
+	@mkdir -p $(dir $@)
+	python3 tools/n64_swap.py $< $@
+
+gen/%_bin.S gen/%_bin.h: $(BUILD_DIR)/n64data/%.bin tools/bin2s.py
+	@mkdir -p gen
+	python3 tools/bin2s.py -a 4 -H gen/$*_bin.h $< > gen/$*_bin.S
+
+$(BUILD_DIR)/$(NAME).elf: $(OBJS)
+
+$(NAME).z64: N64_ROM_TITLE = "Apotris"
+
+clean:
+	rm -rf $(BUILD_DIR) gen $(NAME).z64
+
+-include $(wildcard $(BUILD_DIR)/*.d) $(wildcard $(BUILD_DIR)/source/*.d)
+
+.PHONY: all clean
+
+# keep the swapped and generated asset files, so a rebuild does not redo them all
+.SECONDARY:

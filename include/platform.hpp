@@ -3,6 +3,7 @@
 #include <list>
 
 #define PLATFORM_N3DS 6
+#define PLATFORM_N64 7
 
 #ifdef GBA
 
@@ -68,6 +69,13 @@
 
 #define PLATFORM PLATFORM_N3DS
 #include "liba_n3ds.h"
+
+#endif
+
+#ifdef APOTRIS_N64
+
+#define PLATFORM PLATFORM_N64
+#include "liba_n64.h"
 
 #endif
 

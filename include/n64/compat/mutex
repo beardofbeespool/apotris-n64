@@ -1,0 +1,29 @@
+#pragma once
+
+// libdragon's toolchain is built without a thread model, so <mutex> is empty.
+// The N64 port is single threaded; these are no-op stand-ins so shared code
+// that only needs the API keeps compiling.
+
+namespace std {
+
+class mutex {
+public:
+    void lock() {}
+    void unlock() {}
+    bool try_lock() { return true; }
+};
+
+template <class M> class lock_guard {
+public:
+    explicit lock_guard(M&) {}
+};
+
+template <class M> class unique_lock {
+public:
+    unique_lock() = default;
+    explicit unique_lock(M&) {}
+    void lock() {}
+    void unlock() {}
+};
+
+} // namespace std

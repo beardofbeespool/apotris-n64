@@ -1,0 +1,20 @@
+#pragma once
+
+#include <mutex>
+
+namespace std {
+
+class shared_mutex {
+public:
+    void lock() {}
+    void unlock() {}
+    void lock_shared() {}
+    void unlock_shared() {}
+};
+
+template <class M> class shared_lock {
+public:
+    explicit shared_lock(M&) {}
+};
+
+} // namespace std
