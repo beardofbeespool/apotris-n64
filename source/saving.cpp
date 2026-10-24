@@ -301,7 +301,7 @@ GameKeys getDefaultGameKeys() {
         .zone = KEY_SELECT,
     };
 
-#if defined(GBA) || defined(N3DS)
+#if defined(GBA) || defined(N3DS) || defined(APOTRIS_N64)
     k.hold |= KEY_L;
 #endif
 

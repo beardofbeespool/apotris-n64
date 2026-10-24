@@ -118,6 +118,8 @@ $(BUILD_DIR)/$(NAME).dfs: $(SFX_WAV64) $(MUSIC_WAV64)
 $(NAME).z64: $(BUILD_DIR)/$(NAME).dfs
 
 $(NAME).z64: N64_ROM_TITLE = "Apotris"
+# settings and records are kept in 32 KB of cartridge SRAM
+$(NAME).z64: N64_ROM_SAVETYPE = sram256k
 
 clean:
 	rm -rf $(BUILD_DIR) gen $(NAME).z64

@@ -25,6 +25,12 @@ extern void ppuRenderFrameRdp(int originX, int originY);
 
 void audioInit();
 void audioUpdate();
+void saveUpdate();
+
+// Longest a 1 KB piece of a save takes to write to SRAM, with margin
+constexpr int SAVE_CHUNK_US = 1500;
+// Longest a mixer_try_play() call takes (about 2 ms in ares), with margin
+constexpr int MIXER_CALL_US = 2500;
 
 LinkUniversal* linkUniversal = nullptr;
 MultiplayerLink* multiplayerLink = nullptr;
@@ -217,10 +223,18 @@ void readInputLate(uint32_t vblank, uint32_t busyTicks) {
 
     const int32_t delay = (int32_t)frameTicks - (int32_t)busyEstimate -
                           (int32_t)TICKS_FROM_US(INPUT_MARGIN_US);
-    // keep the audio fed while waiting
     const uint32_t until = vblank + (delay > 0 ? delay : 0);
-    while ((int32_t)(get_ticks() - until) < 0)
-        mixer_try_play();
+
+    // a pending save goes to SRAM a piece at a time, when there is time left
+    if ((int32_t)(until - get_ticks()) > (int32_t)TICKS_FROM_US(SAVE_CHUNK_US))
+        saveUpdate();
+
+    // Keep the audio fed while waiting, but not close to the read: a call
+    // that has to decode more music takes up to about 2 ms.
+    while ((int32_t)(get_ticks() - until) < 0) {
+        if ((int32_t)(until - get_ticks()) > (int32_t)TICKS_FROM_US(MIXER_CALL_US))
+            mixer_try_play();
+    }
 
     inputReadAt = get_ticks();
     directInputValid = readControllerNow(&directInput);
@@ -469,14 +483,141 @@ void setUpPresentException(std::string error) {
     printf("%s\n", error.c_str());
 }
 
-// --- saving (not persistent yet) ----------------------------------------
+// --- saving ---------------------------------------------------------------
+//
+// The save lives in the cartridge's 32 KB SRAM (the ROM header asks the
+// flashcart or emulator for it, see N64_ROM_SAVETYPE in Makefile.n64), in two
+// slots written alternately, after the first 1 KB (see SAVE_BASE). Each slot
+// is a header (counter, size, checksum) followed by the Save, and the header
+// is written last: if the power goes while saving, that slot fails its
+// checksum and the other one, one save older, is loaded instead.
+//
+// saveSavefile() only takes a copy; the copy goes to SRAM 1 KB per frame in
+// the idle time before the controller is read (saveUpdate()), so saving
+// never costs a frame, even an autosave in the middle of a game.
+
+namespace {
+
+struct SaveHeader {
+    u32 magic;
+    u32 counter;
+    u32 size;
+    u32 crc;
+};
+
+constexpr u32 SAVE_MAGIC = 0x41504E36; // "APN6"
+// The first 1 KB of SRAM is left unused: libdragon's flashcart probing (for
+// the SD card) writes the old EverDrive key to 0x08040020, which lands in
+// the first bytes of SRAM wherever SRAM repeats every 32 KB, as in ares.
+constexpr int SAVE_BASE = 0x400;
+constexpr int SAVE_SLOT_SIZE = 0x3E00;
+constexpr int SAVE_CHUNK = 1024;
+static_assert(sizeof(SaveHeader) + sizeof(Save) <= SAVE_SLOT_SIZE,
+              "the save no longer fits an SRAM slot");
+
+bool sramPresent = false;
+u32 saveCounter = 0;          // counter of the newest slot
+int saveSlot = 0;             // slot holding the newest save
+
+alignas(16) u8 saveBuffer[(sizeof(SaveHeader) + sizeof(Save) + 15) & ~15];
+int saveWritten = -1;         // bytes of saveBuffer written, -1 when idle
+int saveTarget = 0;           // slot being written
+
+u32 crc32(const u8* data, size_t len) {
+    u32 crc = 0xffffffff;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (int k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xedb88320 & (0 - (crc & 1)));
+    }
+    return ~crc;
+}
+
+void sramRead(int slot) {
+    sram_read(saveBuffer, SAVE_BASE + slot * SAVE_SLOT_SIZE, sizeof(saveBuffer));
+}
+
+} // namespace
 
 void loadSavefile() {
     if (savefile == nullptr)
         savefile = new Save();
+
+    // No sram_detect(): it probes by writing a test pattern, which in ares
+    // lands inside the save data and corrupts it. The ROM header asks for
+    // SRAM; without it the checksums fail and the game starts fresh.
+    sram_init();
+    sramPresent = true;
+
+    // the newest slot that checks out
+    int best = -1;
+    for (int slot = 0; slot < 2; slot++) {
+        sramRead(slot);
+        const SaveHeader* h = (const SaveHeader*)saveBuffer;
+        if (h->magic != SAVE_MAGIC || h->size != sizeof(Save) ||
+            h->crc != crc32(saveBuffer + sizeof(SaveHeader), sizeof(Save)))
+            continue;
+        if (best == -1 || h->counter > saveCounter) {
+            best = slot;
+            saveCounter = h->counter;
+        }
+    }
+
+    if (best == -1) {
+        debugf("save: none found, starting fresh\n");
+        return;
+    }
+    sramRead(best);
+    memcpy(savefile, saveBuffer + sizeof(SaveHeader), sizeof(Save));
+    saveSlot = best;
+    debugf("save: loaded slot %d (save %lu)\n", best, (unsigned long)saveCounter);
 }
 
-void saveSavefile() {}
+void saveSavefile() {
+    if (!sramPresent || savefile == nullptr)
+        return;
+
+    // a save still being written is simply replaced by the newer one, in the
+    // same slot, so the other slot always keeps the last complete save
+    if (saveWritten == -1) {
+        saveTarget = saveSlot ^ 1;
+        saveCounter++;
+    }
+
+    SaveHeader* h = (SaveHeader*)saveBuffer;
+    memcpy(saveBuffer + sizeof(SaveHeader), savefile, sizeof(Save));
+    h->magic = SAVE_MAGIC;
+    h->counter = saveCounter;
+    h->size = sizeof(Save);
+    h->crc = crc32(saveBuffer + sizeof(SaveHeader), sizeof(Save));
+    saveWritten = 0;
+}
+
+// Writes the next piece of a pending save, the header last
+void saveUpdate() {
+    if (saveWritten == -1)
+        return;
+
+    const int base = SAVE_BASE + saveTarget * SAVE_SLOT_SIZE;
+    const int total = sizeof(SaveHeader) + sizeof(Save);
+    const int dataStart = sizeof(SaveHeader);
+
+    if (saveWritten < dataStart)
+        saveWritten = dataStart;
+
+    if (saveWritten < total) {
+        const int len = std::min(SAVE_CHUNK, total - saveWritten);
+        sram_write(saveBuffer + saveWritten, base + saveWritten, len);
+        saveWritten += len;
+        return;
+    }
+
+    sram_write(saveBuffer, base, sizeof(SaveHeader));
+    saveSlot = saveTarget;
+    saveWritten = -1;
+    debugf("save: written to slot %d (save %lu)\n", saveSlot,
+           (unsigned long)saveCounter);
+}
 
 // --- audio ----------------------------------------------------------------
 //

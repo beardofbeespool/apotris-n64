@@ -1438,7 +1438,7 @@ void setPawnPalette(int dest, int n, int blend, bool flip) {
 }
 
 std::string getStringFromKey(int key) {
-#if defined(GBA) || defined(N3DS)
+#if defined(GBA) || defined(N3DS) || defined(APOTRIS_N64)
 
     std::string result;
 

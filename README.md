@@ -366,7 +366,11 @@ Controls:
 | Z | Select |
 | L / R | L / R |
 
-The C buttons and the analog stick are passed to the game as extra inputs of their own.
+The C buttons and the analog stick are passed to the game as extra inputs of their own. By default Hold is on both L and R.
+
+Every action can be remapped in Settings > Controls, to one button or several: select an action, then press each button you want for it (one after another or together). The binding is set half a second after you let go of the last one, and any of those buttons used by another action is taken off it. Z on an action puts its default back.
+
+Saving: settings, records and everything else the game keeps are saved in 32 KB of cartridge SRAM, which the ROM header asks the flashcart (or emulator) for. There are two copies, written alternately with a checksum, so losing power while saving loses at most the latest save. A save is written to SRAM 1 KB per frame in the idle time before the controller is read, so it never costs a frame. The first 1 KB of SRAM is left unused: libdragon's flashcart detection writes to an address that lands there on some setups (ares, for one).
 
 Picture and latency:
 
@@ -399,7 +403,7 @@ Sound:
 
   It needs `openmpt123`, `ffmpeg` and libdragon's `audioconv64`. Only add music you have the right to use; it stays on your SD card and never goes into the ROM.
 
-Not done yet: saving (settings and records are lost at power off), and multiplayer.
+Not done yet: multiplayer. The link cable and online modes need a second console or a network; local multiplayer would need a split-screen layout with two full-size boards.
 
 ### Android
 You will need the Android NDK installed and configured.

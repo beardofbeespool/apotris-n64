@@ -124,6 +124,11 @@ public:
 
         bool exit = false;
 
+#ifdef APOTRIS_N64
+        u32 collected = 0;
+        int idleFrames = 0;
+#endif
+
         while (closed()) {
             canDraw = 1;
             vsync();
@@ -179,6 +184,31 @@ public:
                 }
 
                 keys[index] = key;
+                sfx(SFX_MENUCONFIRM);
+                exit = true;
+                continue;
+            }
+
+#elif defined(APOTRIS_N64)
+
+            // Every button pressed goes into the binding, one after another
+            // or together, so an action can have several (Hold on both L
+            // and R, say). The binding is set once all buttons are released
+            // and none has been pressed for half a second. Buttons taken
+            // from other actions are removed from them.
+            u32 hit = key_hit(VALID_KEY_MASK);
+
+            if (hit) {
+                collected |= hit;
+                idleFrames = 0;
+            } else if (collected && !(keys_raw() & VALID_KEY_MASK) &&
+                       ++idleFrames >= 30) {
+                for (int i = 0; i < max; i++) {
+                    if (i != index)
+                        keys[i] &= ~collected;
+                }
+
+                keys[index] = collected;
                 sfx(SFX_MENUCONFIRM);
                 exit = true;
                 continue;
@@ -258,7 +288,7 @@ public:
     std::string getCurrentOption() override {
         if (reading) {
             return "...";
-#ifdef N3DS
+#if defined(N3DS) || defined(APOTRIS_N64)
         } else if (keys[index] == UNBOUND) {
 #else
         } else if (keys[index] < 0) {
@@ -286,8 +316,13 @@ public:
             if (i == index)
                 continue;
 
+#ifdef APOTRIS_N64
+            // bindings are button masks: take back only the buttons in use
+            keys[i] &= ~keys[index];
+#else
             if (keys[i] == keys[index])
                 keys[i] = KEY_FULL - 2;
+#endif
         }
 
         sfx(SFX_MENUCONFIRM);

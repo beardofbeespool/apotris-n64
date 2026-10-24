@@ -27,3 +27,4 @@ android/gradle/*
 build/
 gen/
 *.z64
+*.ram
