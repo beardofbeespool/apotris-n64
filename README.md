@@ -368,11 +368,22 @@ Controls:
 
 The C buttons and the analog stick are passed to the game as extra inputs of their own.
 
+Picture and latency:
+
+- The output is 240p with all VI filtering off, so every pixel reaches a CRT exactly as drawn: no interlace flicker, no blur and no dithering. The 240x160 picture sits in the middle of the 320x240 screen at its original aspect ratio, well clear of the overscan on most TVs.
+- Two framebuffers rather than three, as a third only queues up frames and adds a frame of lag.
+- Low input latency: a frame appears at the vblank after it is drawn, so the controller is read as late in the frame as the frame's work allows. The busiest recent frame (logic + drawing + the read) plus a 2 ms margin is left before the next vblank, and controller 1 is read directly right before that. In a game this puts input on screen about 8-9 ms after it is read, where reading right after the vblank would take a whole frame. If a frame still misses its vblank (this happens at some screen transitions), reading moves back to the start of the frame and creeps later again over the next seconds.
+
 How the port works:
 
-- The shared game code draws through the same GBA-style tile and sprite API as the other ports. `source/n64/ppu.cpp` keeps that state and draws it on the RDP: every 8x8 tile is a CI4 textured rectangle read straight from RAM, with the GBA palettes as the TLUT, and affine sprites are two textured triangles. This runs at 60 fps. Building with `-DAPOTRIS_N64_CPU_PPU` draws on the CPU instead, which is much slower but useful to compare against.
+- The shared game code draws through the same GBA-style tile and sprite API as the other ports. `source/n64/ppu.cpp` keeps that state and draws it on the RDP in the GBA's back to front order, with the tile data read straight from RAM as CI4 textures and the GBA palettes as the TLUT. A whole frame takes the CPU about 5-6 ms during a game.
+  - Background layers: runs of the same tile become one repeating rectangle, and blocks are sorted by tile and palette so each tile is loaded into TMEM once per layer.
+  - Sprites: all tiles of a sprite are loaded together (up to 32 at a time) and each tile is one rectangle.
+  - Scaled sprites are scaled rectangles covering exactly the pixels the GBA would draw. Rotated sprites are two textured triangles.
+  - The backdrop gradient is a 1-pixel-wide texture stretched across the screen.
+- The output matches a straightforward CPU renderer pixel for pixel. Build with `APOTRIS_FLAGS=-DAPOTRIS_N64_PPU_COMPARE` to check: every frame is drawn both ways and differences are logged (the first bad frame is dumped as hex). `APOTRIS_FLAGS=-DAPOTRIS_N64_CPU_PPU` uses the CPU renderer for display instead; it is far too slow for 60 fps. Changing `APOTRIS_FLAGS` rebuilds everything.
 - The GBA assets in `data/` are little-endian, while the N64 is big-endian. `tools/n64_swap.py` swaps their byte order at build time (tiles as 32-bit rows, palettes and tilemaps as 16-bit values), so the game code reads them the same way as on the GBA.
-- Once a second the game logs its frame rate and draw time through `debugf`. ares shows it in its terminal; on a flashcart it goes to the USB debug log.
+- Once a second the game logs its frame rate, the time spent on game logic and drawing (and how much of that was waiting for the RDP), the busiest frame, the input-to-screen time and any missed vblanks through `debugf`. ares shows it in its terminal; on a flashcart it goes to the USB debug log.
 
 Not done yet: audio, saving (settings and records are lost at power off), and multiplayer.
 

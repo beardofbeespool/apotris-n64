@@ -13,6 +13,7 @@
 #include <cstdarg>
 #include <cstddef>
 #include <cstdio>
+#include <algorithm>
 #include <type_traits>
 
 #include <libdragon.h>
@@ -885,11 +886,36 @@ struct Region {
 };
 
 int originX, originY;
-const void* lastLoaded;
+
+// What the RDP state already holds, so commands are only sent on a change.
+// Every rdpq command costs the CPU a couple of microseconds, which adds up
+// over the hundreds of tiles in a frame.
+const u8* imageBase;          // texture image the tiles are loaded from
+const void* lastLoaded;       // tile currently in TMEM
+int drawPalette;              // palette set on TILE_DRAW, -1 if unknown
+
+void resetRdpState() {
+    imageBase = nullptr;
+    lastLoaded = nullptr;
+    drawPalette = -1;
+}
 
 inline bool tileEmpty(const tng::ImageTile& t) {
     return !(t.rows[0] | t.rows[1] | t.rows[2] | t.rows[3] | t.rows[4] |
              t.rows[5] | t.rows[6] | t.rows[7]);
+}
+
+// Whether each tile is empty, worked out once per frame: a layer uses the
+// same few tiles hundreds of times, and every check of a tile that is not
+// in the cache costs a slow trip to RAM. 0 = not checked yet, 1 = empty,
+// 2 = has pixels. BG tile numbers can reach past the last charblock.
+u8 bgTileState[4 * 512 + 1024];
+u8 spriteTileState[tng::SPRITE_TILE_COUNT];
+
+inline bool tileEmptyCached(u8& state, const tng::ImageTile& t) {
+    if (state == 0)
+        state = tileEmpty(t) ? 1 : 2;
+    return state == 1;
 }
 
 void buildTlut(u16* dst, const std::array<std::array<u16, 16>, 16>& pals) {
@@ -899,10 +925,15 @@ void buildTlut(u16* dst, const std::array<std::array<u16, 16>, 16>& pals) {
         // index 0 of every palette is transparent
         dst[p * 16] &= ~1;
     }
-    data_cache_hit_writeback(dst, 256 * sizeof(u16));
 }
 
+Region scissor;
+
 void setScissor(Region r) {
+    if (r.x0 == scissor.x0 && r.y0 == scissor.y0 && r.x1 == scissor.x1 &&
+        r.y1 == scissor.y1)
+        return;
+    scissor = r;
     rdpq_set_scissor(originX + r.x0, originY + r.y0, originX + r.x1,
                      originY + r.y1);
 }
@@ -943,51 +974,187 @@ template <typename F> void forEachWindowRect(const cr::ClipWindow& w, F draw) {
     }
 }
 
-// One 8x8 CI4 tile at (x, y) in GBA screen space
-void drawTile(const tng::ImageTile* tile, int palette, bool flipx, bool flipy,
-              int x, int y) {
+// A block of w x h copies of one 8x8 CI4 tile, top left at (x, y) in GBA
+// screen space. The tile descriptor wraps every 8 texels, so a single
+// rectangle repeats the tile across the whole block.
+void drawTileBlock(const tng::ImageTile* tile, int palette, bool flipx,
+                   bool flipy, int x, int y, int w, int h) {
     if (tile != lastLoaded) {
-        // 4 bytes per row, loaded as 8 bit texels into 8 byte TMEM lines
-        rdpq_set_texture_image_raw(0, PhysicalAddr(tile), FMT_CI8, 4, 8);
-        rdpq_load_tile(TILE_LOAD, 0, 0, 4, 8);
+        // Tiles are loaded as an image 4 bytes (8 texels) wide with one tile
+        // per 8 rows, so one image covers about 128 tiles (load coordinates
+        // stay below 1024) and a load only needs the row. TMEM lines are 8
+        // bytes, which leaves room for the padding.
+        const u8* p = (const u8*)tile;
+        if (imageBase == nullptr || p < imageBase || p + 32 > imageBase + 4064) {
+            imageBase = (const u8*)((uintptr_t)p & ~(uintptr_t)7);
+            rdpq_set_texture_image_raw(0, PhysicalAddr(imageBase), FMT_CI8, 4,
+                                       1024);
+        }
+        const int row = (p - imageBase) / 4;
+        rdpq_load_tile(TILE_LOAD, 0, row, 4, row + 8);
         lastLoaded = tile;
     }
 
-    // a flipped tile is sampled from the mirrored repeat (s/t 8..15)
-    rdpq_tileparms_t parms = {};
-    parms.palette = (uint8_t)palette;
-    parms.s.mirror = parms.t.mirror = true;
-    parms.s.mask = parms.t.mask = 3;
-    rdpq_set_tile(TILE_DRAW, FMT_CI4, 0, 8, &parms);
+    if (palette != drawPalette) {
+        rdpq_tileparms_t parms = {};
+        parms.palette = (uint8_t)palette;
+        parms.s.mask = parms.t.mask = 3;
+        rdpq_set_tile(TILE_DRAW, FMT_CI4, 0, 8, &parms);
+        drawPalette = palette;
+    }
+
     // Tile rows are u32 values with the left pixel in the low nibble, so in
-    // big-endian memory the RDP reads them right to left: an unflipped tile
-    // is the one drawn mirrored.
-    rdpq_texture_rectangle(TILE_DRAW, originX + x, originY + y,
-                           originX + x + 8, originY + y + 8, flipx ? 0 : 8,
-                           flipy ? 8 : 0);
+    // big-endian memory the RDP sees each row right to left. An unflipped
+    // tile is therefore read with s counting down, a flipped one counting up;
+    // half a texel keeps the point sampling inside the right texel.
+    const int pw = w * 8, ph = h * 8;
+    const float s0 = flipx ? 0.0f : pw - 0.5f;
+    const float t0 = flipy ? ph - 0.5f : 0.0f;
+    rdpq_texture_rectangle_scaled(TILE_DRAW, originX + x, originY + y,
+                                  originX + x + pw, originY + y + ph, s0, t0,
+                                  flipx ? s0 + pw : s0 - pw,
+                                  flipy ? t0 - ph : t0 + ph);
 }
+
+inline void drawTile(const tng::ImageTile* tile, int palette, bool flipx,
+                     bool flipy, int x, int y) {
+    drawTileBlock(tile, palette, flipx, flipy, x, y, 1, 1);
+}
+
+// Blocks of identical tiles in a layer, packed as sort keys
+u32 layerBlocks[31 * 21];
 
 void drawBgLayer(int layer) {
     const tng::LayerInfo& li = layerInfo[layer];
     const u16* map = tng::bg_screenblocks[li.sbb];
     const tng::ImageTile* tiles = &tng::bg_charblocks[li.cbb][0];
+    u8* tileState = &bgTileState[li.cbb * 512];
 
     const int sx = li.scroll_x & 255, sy = li.scroll_y & 255;
 
-    forEachWindowRect(cr::bg_clip_windows[layer], [&] {
-        for (int row = 0; row < 21; row++) {
-            const int y = row * 8 - (sy & 7);
-            const int ty = ((sy >> 3) + row) & 31;
-            for (int col = 0; col < 31; col++) {
-                const u16 e = map[ty * 32 + (((sx >> 3) + col) & 31)];
-                const tng::ImageTile* tile = &tiles[e & 0x3ff];
-                if (tileEmpty(*tile))
-                    continue;
-                drawTile(tile, e >> 12, e & 0x400, e & 0x800,
-                         col * 8 - (sx & 7), y);
+    // Runs of the same map entry along each row become one block. The tiles
+    // of a layer never overlap, so blocks can be drawn in any order: sorted
+    // by tile and palette, each tile is loaded once and the palette is set
+    // once per run, and equal runs on consecutive rows end up next to each
+    // other, ready to be merged into taller blocks.
+    int count = 0;
+    for (int row = 0; row < 21; row++) {
+        const int ty = ((sy >> 3) + row) & 31;
+        const u16* line = &map[ty * 32];
+        int col = 0;
+        while (col < 31) {
+            const u16 e = line[((sx >> 3) + col) & 31];
+            int len = 1;
+            while (col + len < 31 && line[((sx >> 3) + col + len) & 31] == e)
+                len++;
+            if (!tileEmptyCached(tileState[e & 0x3ff], tiles[e & 0x3ff])) {
+                // map entry (tile, flips, palette) 16 bits | column 5 |
+                // length - 1 5 | row 5... packed into 31 bits
+                layerBlocks[count++] = ((u32)e << 15) | ((u32)col << 10) |
+                                       ((u32)(len - 1) << 5) | (u32)row;
             }
+            col += len;
+        }
+    }
+    if (count == 0)
+        return;
+    std::sort(layerBlocks, layerBlocks + count);
+
+    forEachWindowRect(cr::bg_clip_windows[layer], [&] {
+        for (int i = 0; i < count;) {
+            const u32 key = layerBlocks[i];
+            // the same run on the rows below
+            int rows = 1;
+            while (i + rows < count && layerBlocks[i + rows] == key + rows)
+                rows++;
+            i += rows;
+
+            const u16 e = key >> 15;
+            const int col = (key >> 10) & 31, len = ((key >> 5) & 31) + 1;
+            const int row = key & 31;
+            drawTileBlock(&tiles[e & 0x3ff], e >> 12, e & 0x400, e & 0x800,
+                          col * 8 - (sx & 7), row * 8 - (sy & 7), len, rows);
         }
     });
+}
+
+// A sprite's tiles are consecutive in memory, so they are loaded together,
+// up to 32 at a time (64 bytes of TMEM each with the line padding, next to
+// the palettes), and each tile is then picked by its row in TMEM: one
+// command per tile instead of a load and a draw.
+constexpr rdpq_tile_t TILE_SPRITE = TILE1;
+constexpr int SPRITE_TILES_PER_LOAD = 32;
+
+void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
+    const int rowsPerLoad = std::max(1, SPRITE_TILES_PER_LOAD / wt);
+
+    for (int srcY0 = 0; srcY0 < ht; srcY0 += rowsPerLoad) {
+        const int srcY1 = std::min(ht, srcY0 + rowsPerLoad);
+
+        // skip loads where every tile is empty or off screen
+        bool any = false;
+        for (int srcY = srcY0; srcY < srcY1 && !any; srcY++) {
+            const int cy = s->flipy ? ht - 1 - srcY : srcY;
+            const int y = s->y + cy * 8;
+            if (y >= PPU_H || y + 8 <= 0)
+                continue;
+            for (int srcX = 0; srcX < wt; srcX++) {
+                const int index = first + srcY * wt + srcX;
+                if (!tileEmptyCached(spriteTileState[index],
+                                     tng::sprite_tile_images[index])) {
+                    any = true;
+                    break;
+                }
+            }
+        }
+        if (!any)
+            continue;
+
+        const int count = (srcY1 - srcY0) * wt;
+        const u8* p = (const u8*)&tng::sprite_tile_images[first + srcY0 * wt];
+        if (imageBase == nullptr || p < imageBase ||
+            p + count * 32 > imageBase + 4064) {
+            imageBase = p;
+            rdpq_set_texture_image_raw(0, PhysicalAddr(imageBase), FMT_CI8, 4,
+                                       1024);
+        }
+        const int row = (p - imageBase) / 4;
+        rdpq_load_tile(TILE_LOAD, 0, row, 4, row + count * 8);
+        lastLoaded = nullptr;
+
+        rdpq_tileparms_t parms = {};
+        parms.palette = (uint8_t)(s->palette & 15);
+        rdpq_set_tile(TILE_SPRITE, FMT_CI4, 0, 8, &parms);
+        rdpq_set_tile_size(TILE_SPRITE, 0, 0, 8, count * 8);
+
+        for (int srcY = srcY0; srcY < srcY1; srcY++) {
+            const int cy = s->flipy ? ht - 1 - srcY : srcY;
+            const int y = s->y + cy * 8;
+            if (y >= PPU_H || y + 8 <= 0)
+                continue;
+            for (int srcX = 0; srcX < wt; srcX++) {
+                const int index = first + srcY * wt + srcX;
+                if (spriteTileState[index] == 1)
+                    continue;
+                const int cx = s->flipx ? wt - 1 - srcX : srcX;
+                const int x = s->x + cx * 8;
+                if (x >= PPU_W || x + 8 <= 0)
+                    continue;
+                if (tileEmptyCached(spriteTileState[index],
+                                    tng::sprite_tile_images[index]))
+                    continue;
+
+                // rows read backwards unless flipped, see drawTileBlock()
+                const float t = ((srcY - srcY0) * wt + srcX) * 8;
+                const float s0 = s->flipx ? 0.0f : 7.5f;
+                const float t0 = s->flipy ? t + 7.5f : t;
+                rdpq_texture_rectangle_scaled(
+                    TILE_SPRITE, originX + x, originY + y, originX + x + 8,
+                    originY + y + 8, s0, t0, s->flipx ? 8.0f : -0.5f,
+                    s->flipy ? t - 0.5f : t + 8.0f);
+            }
+        }
+    }
 }
 
 void drawSprite(const OBJ_ATTR* s) {
@@ -997,14 +1164,20 @@ void drawSprite(const OBJ_ATTR* s) {
     if (!s->affine) {
         if (s->x >= PPU_W || s->x + w <= 0 || s->y >= PPU_H || s->y + h <= 0)
             return;
+        const int first = s->tile_start & (tng::SPRITE_TILE_COUNT - 1);
+        if (first + wt * ht <= (int)tng::SPRITE_TILE_COUNT) {
+            drawSpriteTiles(s, first, wt, ht);
+            return;
+        }
+        // tile numbers wrap past the end of sprite memory: one tile at a time
         for (int cy = 0; cy < ht; cy++) {
             const int srcY = s->flipy ? ht - 1 - cy : cy;
             for (int cx = 0; cx < wt; cx++) {
                 const int srcX = s->flipx ? wt - 1 - cx : cx;
-                const tng::ImageTile* tile =
-                    &tng::sprite_tile_images[(s->tile_start + srcY * wt + srcX) &
-                                             (tng::SPRITE_TILE_COUNT - 1)];
-                if (tileEmpty(*tile))
+                const int index = (s->tile_start + srcY * wt + srcX) &
+                                  (tng::SPRITE_TILE_COUNT - 1);
+                const tng::ImageTile* tile = &tng::sprite_tile_images[index];
+                if (tileEmptyCached(spriteTileState[index], *tile))
                     continue;
                 drawTile(tile, s->palette & 15, s->flipx, s->flipy,
                          s->x + cx * 8, s->y + cy * 8);
@@ -1019,6 +1192,23 @@ void drawSprite(const OBJ_ATTR* s) {
         return;
     if (w > 64 || h > 64)
         return;
+
+    {
+        // Not scaled or rotated (at most flipped): the same pixels as a plain
+        // sprite centred in the render box, drawn the fast way.
+        const float* m = s->affine_mat;
+        if (m[1] == 0.0f && m[2] == 0.0f && fabsf(m[0]) == 1.0f &&
+            fabsf(m[3]) == 1.0f) {
+            OBJ_ATTR plain = *s;
+            plain.affine = false;
+            plain.x += (rw - w) / 2;
+            plain.y += (rh - h) / 2;
+            plain.flipx = s->flipx != (m[0] < 0);
+            plain.flipy = s->flipy != (m[3] < 0);
+            forEachWindowRect(cr::sprites_clip_window, [&] { drawSprite(&plain); });
+            return;
+        }
+    }
 
     // the GBA only draws inside the render box
     const cr::ClipWindow& win = cr::sprites_clip_window;
@@ -1042,13 +1232,11 @@ void drawSprite(const OBJ_ATTR* s) {
             const tng::ImageTile& t =
                 tng::sprite_tile_images[(s->tile_start + (y >> 3) * wt + cx) &
                                         (tng::SPRITE_TILE_COUNT - 1)];
-            const u32 row = t.rows[y & 7];
-            u8* dst = image + y * pitch + cx * 4;
-            // GBA rows keep the left pixel in the low nibble, CI4 in the high one
-            for (int k = 0; k < 4; k++) {
-                const u32 pair = row >> (k * 8);
-                dst[k] = ((pair & 0xf) << 4) | ((pair >> 4) & 0xf);
-            }
+            // GBA rows keep the left pixel in the lowest nibble, CI4 wants it
+            // in the highest: reverse the order of the 8 nibbles
+            u32 row = t.rows[y & 7];
+            row = ((row >> 4) & 0x0f0f0f0f) | ((row & 0x0f0f0f0f) << 4);
+            *(u32*)(image + y * pitch + cx * 4) = __builtin_bswap32(row);
         }
     }
     data_cache_hit_writeback(image, pitch * h);
@@ -1056,8 +1244,8 @@ void drawSprite(const OBJ_ATTR* s) {
     rdpq_set_texture_image_raw(0, PhysicalAddr(image), FMT_CI8, pitch, h);
     rdpq_set_tile(TILE_LOAD, FMT_CI8, 0, pitch, NULL);
     rdpq_load_tile(TILE_LOAD, 0, 0, pitch, h);
-    lastLoaded = nullptr;
     rdpq_set_tile(TILE_LOAD, FMT_CI8, 0, 8, NULL);
+    resetRdpState();
 
     rdpq_tileparms_t parms = {};
     parms.palette = (uint8_t)(s->palette & 15);
@@ -1072,19 +1260,55 @@ void drawSprite(const OBJ_ATTR* s) {
     const float cx = originX + s->x + rw * 0.5f;
     const float cy = originY + s->y + rh * 0.5f;
 
+    setScissor(box);
+
+    if (b == 0.0f && c == 0.0f && a != 0.0f && d != 0.0f) {
+        // Scaled but not rotated: a scaled texture rectangle covering exactly
+        // the pixels whose centre maps inside the sprite, as on the GBA.
+        const float ia = 1.0f / a, id = 1.0f / d;
+        const float hw = w * 0.5f * fabsf(a), hh = h * 0.5f * fabsf(d);
+        const float centerX = s->x + rw * 0.5f, centerY = s->y + rh * 0.5f;
+        const int x0 = (int)ceilf(centerX - hw - 0.5f);
+        const int x1 = (int)ceilf(centerX + hw - 0.5f);
+        const int y0 = (int)ceilf(centerY - hh - 0.5f);
+        const int y1 = (int)ceilf(centerY + hh - 0.5f);
+        if (x0 >= x1 || y0 >= y1)
+            return;
+
+        // texel at the centre of the first pixel, then one step per pixel
+        float s0 = ia * (x0 + 0.5f - centerX) + w * 0.5f;
+        float t0 = id * (y0 + 0.5f - centerY) + h * 0.5f;
+        float ds = ia, dt = id;
+        // flipping maps texel n to w-1-n
+        constexpr float EDGE = 1.0f / 256;
+        if (s->flipx)
+            s0 = w - EDGE - s0, ds = -ds;
+        if (s->flipy)
+            t0 = h - EDGE - t0, dt = -dt;
+
+        rdpq_texture_rectangle_scaled(TILE_DRAW, originX + x0, originY + y0,
+                                      originX + x1, originY + y1, s0, t0,
+                                      s0 + ds * (x1 - x0), t0 + dt * (y1 - y0));
+        rdpq_set_tile_size(TILE_DRAW, 0, 0, 8, 8);
+        return;
+    }
+
+    // The RDP samples and covers pixels at their top-left corner, the GBA
+    // (and the CPU renderer) at their centre. Moving the quad up and left by
+    // half a pixel makes both pick the same pixels and texels.
+    const float sx = cx - 0.5f, sy = cy - 0.5f;
+
     float v[4][5];
     const float corners[4][2] = {{0, 0}, {(float)w, 0}, {(float)w, (float)h}, {0, (float)h}};
     for (int i = 0; i < 4; i++) {
         const float du = corners[i][0] - w * 0.5f;
         const float dv = corners[i][1] - h * 0.5f;
-        v[i][0] = cx + a * du + b * dv;
-        v[i][1] = cy + c * du + d * dv;
+        v[i][0] = sx + a * du + b * dv;
+        v[i][1] = sy + c * du + d * dv;
         v[i][2] = s->flipx ? w - corners[i][0] : corners[i][0];
         v[i][3] = s->flipy ? h - corners[i][1] : corners[i][1];
         v[i][4] = 1.0f;
     }
-
-    setScissor(box);
 
     rdpq_triangle(&TRIFMT_TEX, v[0], v[1], v[2]);
     rdpq_triangle(&TRIFMT_TEX, v[0], v[2], v[3]);
@@ -1106,34 +1330,48 @@ void drawSprites(int priority) {
 
 } // namespace
 
+// The backdrop gradient as a texture: one colour per line, 4 texels wide to
+// fill a TMEM line, stretched across the screen by a single rectangle.
+alignas(16) u16 gradientTexture[PPU_H][4];
+
 void ppuRenderFrameRdp(int ox, int oy) {
     originX = ox;
     originY = oy;
-    lastLoaded = nullptr;
+    resetRdpState();
+    scissor = {-1, -1, -1, -1};
+    memset(bgTileState, 0, sizeof(bgTileState));
+    memset(spriteTileState, 0, sizeof(spriteTileState));
 
     buildSpriteLists();
-
-    // everything the RDP reads has to be in RAM, not just in the CPU cache
-    data_cache_hit_writeback(tng::bg_storage, sizeof(tng::bg_storage));
-    data_cache_hit_writeback(tng::sprite_tile_images,
-                             sizeof(tng::sprite_tile_images));
     buildTlut(tlutBg, tng::palettes_bg);
     buildTlut(tlutSprite, tng::palettes_sprite);
-
-    // backdrop, one line at a time when the gradient is on
-    rdpq_set_mode_fill(color_from_packed16(tng::palettes_bg[0][0]));
-    setScissor({0, 0, PPU_W, PPU_H});
     if (gradientEnabled) {
         for (int y = 0; y < PPU_H; y++) {
-            rdpq_set_fill_color(
-                color_from_packed16(tng::color_gba_to_tng(gradientTable[y])));
-            rdpq_fill_rectangle(ox, oy + y, ox + PPU_W, oy + y + 1);
+            const u16 c = tng::color_gba_to_tng(gradientTable[y]);
+            gradientTexture[y][0] = gradientTexture[y][1] = c;
+            gradientTexture[y][2] = gradientTexture[y][3] = c;
         }
-    } else {
-        rdpq_fill_rectangle(ox, oy, ox + PPU_W, oy + PPU_H);
     }
 
-    rdpq_set_mode_standard();
+    // Everything the RDP reads (tiles, palettes, the gradient) has to be in
+    // RAM, not just in the CPU cache. Flushing the whole 8 KB cache is far
+    // quicker than walking the 96 KB of tile memory line by line.
+    data_cache_writeback_invalidate_all();
+
+    setScissor({0, 0, PPU_W, PPU_H});
+    if (gradientEnabled) {
+        rdpq_set_mode_standard();
+        surface_t gradient =
+            surface_make_linear(gradientTexture, FMT_RGBA16, 4, PPU_H);
+        rdpq_tex_upload(TILE_DRAW, &gradient, NULL);
+        rdpq_texture_rectangle_scaled(TILE_DRAW, ox, oy, ox + PPU_W, oy + PPU_H,
+                                      0, 0, 0, PPU_H);
+    } else {
+        rdpq_set_mode_fill(color_from_packed16(tng::palettes_bg[0][0]));
+        rdpq_fill_rectangle(ox, oy, ox + PPU_W, oy + PPU_H);
+        rdpq_set_mode_standard();
+    }
+
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_alphacompare(1);
     rdpq_set_tile(TILE_LOAD, FMT_CI8, 0, 8, NULL);
@@ -1144,6 +1382,8 @@ void ppuRenderFrameRdp(int ox, int oy) {
         if (tlut != t) {
             rdpq_tex_upload_tlut((u16*)t, 0, 256);
             tlut = t;
+            // the upload points the texture image at the palette
+            imageBase = nullptr;
         }
     };
 
