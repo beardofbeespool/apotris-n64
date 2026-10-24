@@ -346,6 +346,36 @@ To build the CIA, you will need to install [`bannertool`](https://github.com/Epi
 meson compile -C build-n3ds cia
 ```
 
+### Nintendo 64
+
+The N64 port uses [libdragon](https://github.com/DragonMinded/libdragon) (preview branch) and its own Makefile instead of Meson. With libdragon installed and `N64_INST` set:
+
+```bash
+make -f Makefile.n64
+```
+
+The build output file is `apotris.z64`. Copy it to a flashcart such as the SummerCart64, or run it in [ares](https://ares-emu.net).
+
+Controls:
+
+| N64 | Apotris |
+|---|---|
+| D-pad | Move, menu navigation |
+| A / B | A / B |
+| Start | Start |
+| Z | Select |
+| L / R | L / R |
+
+The C buttons and the analog stick are passed to the game as extra inputs of their own.
+
+How the port works:
+
+- The shared game code draws through the same GBA-style tile and sprite API as the other ports. `source/n64/ppu.cpp` keeps that state and draws it on the RDP: every 8x8 tile is a CI4 textured rectangle read straight from RAM, with the GBA palettes as the TLUT, and affine sprites are two textured triangles. This runs at 60 fps. Building with `-DAPOTRIS_N64_CPU_PPU` draws on the CPU instead, which is much slower but useful to compare against.
+- The GBA assets in `data/` are little-endian, while the N64 is big-endian. `tools/n64_swap.py` swaps their byte order at build time (tiles as 32-bit rows, palettes and tilemaps as 16-bit values), so the game code reads them the same way as on the GBA.
+- Once a second the game logs its frame rate and draw time through `debugf`. ares shows it in its terminal; on a flashcart it goes to the USB debug log.
+
+Not done yet: audio, saving (settings and records are lost at power off), and multiplayer.
+
 ### Android
 You will need the Android NDK installed and configured.
 
