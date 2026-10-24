@@ -64,6 +64,59 @@ gen/%_bin.S gen/%_bin.h: $(BUILD_DIR)/n64data/%.bin tools/bin2s.py
 
 $(BUILD_DIR)/$(NAME).elf: $(OBJS)
 
+# --- audio, packed into the ROM filesystem (rom:/) -------------------------
+#
+# Sound effects: assets/*.wav, converted to wav64.
+# Music: the tracker modules in assets/ and the extra songs written by
+# tools/n64_tetris_music.py are rendered to audio with openmpt123 and stored
+# as looping, ULC-compressed wav64 (libdragon plays no MOD or IT itself).
+
+FS_DIR = $(BUILD_DIR)/fs
+N64_MKDFS_ROOT = $(FS_DIR)
+
+EXTRA_SONGS = GAME_g_korobeiniki GAME_h_korobeiniki_turbo GAME_i_bach_menuet
+SONG_NAMES = $(basename $(notdir $(wildcard assets/*.mod assets/*.it))) $(EXTRA_SONGS)
+
+SFX_WAV64 = $(patsubst assets/%.wav,$(FS_DIR)/sfx/%.wav64,$(wildcard assets/*.wav))
+MUSIC_WAV64 = $(SONG_NAMES:%=$(FS_DIR)/music/%.wav64)
+
+# mono 22 kHz and uncompressed: effects stream from ROM, and without a
+# decoder state one effect can play on several channels at once
+$(FS_DIR)/sfx/%.wav64: assets/%.wav
+	@mkdir -p $(dir $@)
+	$(N64_AUDIOCONV) --wav-mono --wav-resample 22050 --wav-compress 0 -o $(dir $@) $< >/dev/null
+
+$(BUILD_DIR)/songs/extra.stamp: tools/n64_tetris_music.py assets-n64/bach-french-suite-3-menuet.mid
+	python3 tools/n64_tetris_music.py assets-n64/bach-french-suite-3-menuet.mid $(BUILD_DIR)/songs
+	@touch $@
+
+$(EXTRA_SONGS:%=$(BUILD_DIR)/songs/%.mod): $(BUILD_DIR)/songs/extra.stamp
+
+# openmpt123 names its output after its input, so render a copy without the
+# extension (it recognises the format from the contents)
+define render_song
+	@mkdir -p $(BUILD_DIR)/render
+	cp $< $(BUILD_DIR)/render/$*
+	openmpt123 --quiet --render --force --samplerate 32000 --no-float $(BUILD_DIR)/render/$* >/dev/null
+	rm $(BUILD_DIR)/render/$*
+	python3 tools/n64_level_wav.py $@ >/dev/null
+endef
+
+$(BUILD_DIR)/render/%.wav: assets/%.mod tools/n64_level_wav.py
+	$(render_song)
+$(BUILD_DIR)/render/%.wav: assets/%.it tools/n64_level_wav.py
+	$(render_song)
+$(BUILD_DIR)/render/%.wav: $(BUILD_DIR)/songs/%.mod tools/n64_level_wav.py
+	$(render_song)
+
+$(FS_DIR)/music/%.wav64: $(BUILD_DIR)/render/%.wav
+	@mkdir -p $(dir $@)
+	$(N64_AUDIOCONV) --wav-compress 2 --wav-loop true -o $(dir $@) $< >/dev/null
+
+$(BUILD_DIR)/$(NAME).dfs: $(SFX_WAV64) $(MUSIC_WAV64)
+
+$(NAME).z64: $(BUILD_DIR)/$(NAME).dfs
+
 $(NAME).z64: N64_ROM_TITLE = "Apotris"
 
 clean:

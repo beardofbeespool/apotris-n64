@@ -354,7 +354,7 @@ The N64 port uses [libdragon](https://github.com/DragonMinded/libdragon) (previe
 make -f Makefile.n64
 ```
 
-The build output file is `apotris.z64`. Copy it to a flashcart such as the SummerCart64, or run it in [ares](https://ares-emu.net).
+The build also needs `python3` and `openmpt123` (Debian/Ubuntu: `apt install openmpt123`), which renders the music. The build output file is `apotris.z64`. Copy it to a flashcart such as the SummerCart64, or run it in [ares](https://ares-emu.net).
 
 Controls:
 
@@ -385,7 +385,21 @@ How the port works:
 - The GBA assets in `data/` are little-endian, while the N64 is big-endian. `tools/n64_swap.py` swaps their byte order at build time (tiles as 32-bit rows, palettes and tilemaps as 16-bit values), so the game code reads them the same way as on the GBA.
 - Once a second the game logs its frame rate, the time spent on game logic and drawing (and how much of that was waiting for the RDP), the busiest frame, the input-to-screen time and any missed vblanks through `debugf`. ares shows it in its terminal; on a flashcart it goes to the USB debug log.
 
-Not done yet: audio, saving (settings and records are lost at power off), and multiplayer.
+Sound:
+
+- The sound effects in `assets/` are converted to mono 22 kHz wav64 files and streamed from ROM, at half volume so that several at once on top of the music do not clip.
+- libdragon plays no MOD or IT files, so the songs are rendered with `openmpt123` at build time, levelled to the same loudness by `tools/n64_level_wav.py`, and stored as looping, ULC-compressed wav64 (about 40 KB per second of music). Changing the music tempo changes the playback speed, so slower music also plays lower, as in the PC version.
+- Extra songs, only in the N64 build, written as modules by `tools/n64_tetris_music.py`: two arrangements of the folk song Korobeiniki (the Tetris "A" theme) made for this port, and Bach's Menuet from the French Suite No. 3, BWV 814 (the Tetris "C" theme). See `assets-n64/CREDITS.md` for the sources and licenses (the Menuet is CC BY-SA 4.0); the game's Credits screen lists them too.
+- Your own music: put `.wav64` files in `sd:/apotris/music/` on the flashcart's SD card. As in the PC version, `MENU_...` songs play in menus and anything else in game, and a file with the same name as a built-in song replaces it. To convert music (tracker modules, `.mp3`, `.wav`, `.ogg`, `.flac` and anything else `ffmpeg` reads):
+
+  ```bash
+  python3 tools/n64_convert_music.py my-music/ -o sd-music/          # in game
+  python3 tools/n64_convert_music.py --menu calm.mp3 -o sd-music/    # menu music
+  ```
+
+  It needs `openmpt123`, `ffmpeg` and libdragon's `audioconv64`. Only add music you have the right to use; it stays on your SD card and never goes into the ROM.
+
+Not done yet: saving (settings and records are lost at power off), and multiplayer.
 
 ### Android
 You will need the Android NDK installed and configured.

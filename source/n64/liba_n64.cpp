@@ -1,6 +1,7 @@
 // N64 platform backend (libdragon): video output, input, saves, stubs.
 #include "platform.hpp"
 
+#include "audio_files.h"
 #include "def.h"
 #include "multiplayerClasses.h"
 #include "matchmakingQueue.hpp"
@@ -12,6 +13,7 @@
 #include <libdragon.h>
 
 #include <algorithm>
+#include <vector>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -20,6 +22,9 @@
 // -DAPOTRIS_N64_CPU_PPU to draw it on the CPU instead, to compare the two.
 extern void ppuRenderFrame(void* dst, int strideBytes);
 extern void ppuRenderFrameRdp(int originX, int originY);
+
+void audioInit();
+void audioUpdate();
 
 LinkUniversal* linkUniversal = nullptr;
 MultiplayerLink* multiplayerLink = nullptr;
@@ -212,8 +217,10 @@ void readInputLate(uint32_t vblank, uint32_t busyTicks) {
 
     const int32_t delay = (int32_t)frameTicks - (int32_t)busyEstimate -
                           (int32_t)TICKS_FROM_US(INPUT_MARGIN_US);
-    if (delay > 0)
-        wait_ticks(delay);
+    // keep the audio fed while waiting
+    const uint32_t until = vblank + (delay > 0 ? delay : 0);
+    while ((int32_t)(get_ticks() - until) < 0)
+        mixer_try_play();
 
     inputReadAt = get_ticks();
     directInputValid = readControllerNow(&directInput);
@@ -284,6 +291,11 @@ void platformInit() {
     joypad_init();
     rdpq_init();
 
+    dfs_init(DFS_DEFAULT_LOCATION);
+    // the SD card holds extra songs; fine if there is none
+    debug_init_sdfs("sd:/", -1);
+    audioInit();
+
     linkUniversal = new LinkUniversal();
     multiplayerLink = new MultiplayerLink(linkUniversal);
 }
@@ -343,6 +355,7 @@ void vsync() {
     uint32_t logicTicks = logicStart ? drawStart - logicStart : 0;
 
     onVBlank();
+    audioUpdate();
 
     if (framebuffer == nullptr)
         framebuffer = display_get();
@@ -465,17 +478,202 @@ void loadSavefile() {
 
 void saveSavefile() {}
 
-// --- audio (silent for now) ---------------------------------------------
+// --- audio ----------------------------------------------------------------
+//
+// Effects and songs are wav64 files in the ROM filesystem (see Makefile.n64),
+// mixed by libdragon on the RSP. Extra songs can be added on the SD card in
+// sd:/apotris/music/ (MENU_... for menu music, anything else plays in game);
+// one with the same name as a built-in song replaces it.
 
-void sfx(int) {}
-void sfxRate(int, float) {}
-void startSong(int, bool) {}
-void stopSong() {}
-void pauseSong() {}
-void resumeSong() {}
-void setMusicVolume(int) {}
-void setMusicTempo(int) {}
-std::string getSongName(int) { return ""; }
+namespace {
+
+constexpr int AUDIO_FREQUENCY = 32000;
+constexpr int MUSIC_CHANNEL = 0;        // stereo: uses channels 0 and 1
+constexpr int SFX_FIRST_CHANNEL = 2;
+constexpr int SFX_VOICES = 14;
+
+wav64_t sfxWaves[SFX_COUNT];
+bool sfxLoaded[SFX_COUNT];
+int nextSfxVoice = 0;
+
+struct SongFile {
+    std::string name;   // file name without .wav64
+    std::string path;
+};
+std::vector<SongFile> songFiles;
+
+wav64_t songWave;
+bool songOpen = false;
+int currentSong = -1;
+bool songLooping = false;
+bool songPaused = false;
+double songPausedAt = 0;
+float musicVolume = 1.0f;
+float musicSpeed = 1.0f;
+
+void addSongs(const char* dir) {
+    dir_t entry;
+    if (dir_findfirst(dir, &entry) != 0)
+        return;
+    do {
+        std::string name = entry.d_name;
+        const std::string ext = ".wav64";
+        if (entry.d_type != DT_REG || name.size() <= ext.size() ||
+            name.compare(name.size() - ext.size(), ext.size(), ext) != 0)
+            continue;
+        name.resize(name.size() - ext.size());
+
+        SongFile song = {name, std::string(dir) + entry.d_name};
+        auto it = std::find_if(songFiles.begin(), songFiles.end(),
+                               [&](const SongFile& s) { return s.name == name; });
+        if (it != songFiles.end())
+            *it = song;
+        else
+            songFiles.push_back(song);
+    } while (dir_findnext(dir, &entry) == 0);
+}
+
+void applyMusicSettings() {
+    if (!songOpen || songPaused)
+        return;
+    mixer_ch_set_vol(MUSIC_CHANNEL, musicVolume, musicVolume);
+    mixer_ch_set_freq(MUSIC_CHANNEL, songWave.wave.frequency * musicSpeed);
+}
+
+// The effects are mastered right up to full scale, so two at once on top of
+// the music would clip. Half volume leaves room, and sits them a little
+// above the music (which is levelled to -21 dB RMS at build time).
+constexpr float SFX_GAIN = 0.5f;
+
+float sfxVolume() {
+    return SFX_GAIN * (savefile ? savefile->settings.sfxVolume / 10.0f : 1.0f);
+}
+
+} // namespace
+
+void audioInit() {
+    audio_init(AUDIO_FREQUENCY, 4);
+    mixer_init(SFX_FIRST_CHANNEL + SFX_VOICES);
+    wav64_init_compression(2);
+
+    for (int i = 0; i < SFX_COUNT; i++) {
+        // "assets/name.wav" -> "rom:/sfx/name.wav64"
+        std::string path = SoundEffectPaths[i];
+        path = "rom:/sfx/" + path.substr(path.rfind('/') + 1);
+        path.replace(path.size() - 4, 4, ".wav64");
+        FILE* f = fopen(path.c_str(), "rb");
+        if (f == nullptr)
+            continue;
+        fclose(f);
+        wav64_open(&sfxWaves[i], path.c_str());
+        sfxLoaded[i] = true;
+    }
+
+    addSongs("rom:/music/");
+    addSongs("sd:/apotris/music/");
+    std::sort(songFiles.begin(), songFiles.end(),
+              [](const SongFile& a, const SongFile& b) { return a.name < b.name; });
+
+    for (int i = 0; i < (int)songFiles.size(); i++) {
+        if (songFiles[i].name.rfind("MENU_", 0) == 0)
+            songs.menu.push_back(i);
+        else
+            songs.game.push_back(i);
+    }
+    debugf("audio: %d songs (%d menu, %d game)\n", (int)songFiles.size(),
+           (int)songs.menu.size(), (int)songs.game.size());
+}
+
+// Every frame: keep the audio buffers filled, and move on to the next song
+// when one that does not loop has finished.
+void audioUpdate() {
+    mixer_try_play();
+
+    if (songOpen && !songLooping && !songPaused && currentSong != -1 &&
+        musicVolume > 0 && !mixer_ch_playing(MUSIC_CHANNEL) && savefile) {
+        if (savefile->settings.cycleSongs == 1)
+            playNextSong();
+        else if (savefile->settings.cycleSongs == 2)
+            playSongRandom(currentMenu);
+    }
+}
+
+void sfxRate(int n, float rate) {
+    if (n < 0 || n >= SFX_COUNT || !sfxLoaded[n])
+        return;
+    const int ch = SFX_FIRST_CHANNEL + nextSfxVoice;
+    nextSfxVoice = (nextSfxVoice + 1) % SFX_VOICES;
+    wav64_play(&sfxWaves[n], ch);
+    mixer_ch_set_vol(ch, sfxVolume(), sfxVolume());
+    if (rate != 1.0f)
+        mixer_ch_set_freq(ch, sfxWaves[n].wave.frequency * rate);
+}
+
+void sfx(int n) { sfxRate(n, 1.0f); }
+
+void startSong(int song, bool loop) {
+    if (song < 0 || song >= (int)songFiles.size())
+        return;
+    if (song == currentSong && songOpen && !songPaused &&
+        mixer_ch_playing(MUSIC_CHANNEL))
+        return;
+
+    stopSong();
+    wav64_open(&songWave, songFiles[song].path.c_str());
+    songOpen = true;
+    wav64_set_loop(&songWave, loop);
+    wav64_play(&songWave, MUSIC_CHANNEL);
+
+    currentSong = song;
+    songLooping = loop;
+    songPaused = false;
+    applyMusicSettings();
+}
+
+void stopSong() {
+    if (!songOpen)
+        return;
+    mixer_ch_stop(MUSIC_CHANNEL);
+    wav64_close(&songWave);
+    songOpen = false;
+    songPaused = false;
+    currentSong = -1;
+}
+
+void pauseSong() {
+    if (!songOpen || songPaused)
+        return;
+    songPausedAt = mixer_ch_get_pos(MUSIC_CHANNEL);
+    mixer_ch_stop(MUSIC_CHANNEL);
+    songPaused = true;
+}
+
+void resumeSong() {
+    if (!songOpen || !songPaused)
+        return;
+    songPaused = false;
+    wav64_play(&songWave, MUSIC_CHANNEL);
+    mixer_ch_set_pos(MUSIC_CHANNEL, songPausedAt);
+    applyMusicSettings();
+}
+
+// 512 is full volume here, as in the other ports' callers
+void setMusicVolume(int volume) {
+    musicVolume = std::clamp(volume / 512.0f, 0.0f, 1.0f);
+    applyMusicSettings();
+}
+
+// 1024 is normal speed; like the PC port, slower also means lower
+void setMusicTempo(int tempo) {
+    musicSpeed = tempo / 1024.0f;
+    applyMusicSettings();
+}
+
+std::string getSongName(int song) {
+    if (song < 0 || song >= (int)songFiles.size())
+        return "Unknown";
+    return songFiles[song].name;
+}
 
 // --- image files (no filesystem yet) ------------------------------------
 
