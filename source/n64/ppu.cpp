@@ -842,8 +842,12 @@ namespace {
 constexpr rdpq_tile_t TILE_DRAW = TILE0;
 constexpr rdpq_tile_t TILE_LOAD = TILE6;
 
-alignas(16) u16 tlutBg[256];
-alignas(16) u16 tlutSprite[256];
+// One set per world: the RDP reads them while the CPU is already preparing
+// the next world, so sharing them would give a world the other's colours
+alignas(16) u16 tlutBgs[tng::WORLD_COUNT][256];
+alignas(16) u16 tlutSprites[tng::WORLD_COUNT][256];
+u16* tlutBg = tlutBgs[0];
+u16* tlutSprite = tlutSprites[0];
 
 // Affine sprites converted to linear CI4, kept between frames: the next
 // queue's pieces, for one, stay the same for many frames. An entry is reused
@@ -1395,8 +1399,10 @@ void drawSprites(int priority) {
 } // namespace
 
 // The backdrop gradient as a texture: one colour per line, 4 texels wide to
-// fill a TMEM line, stretched across the screen by a single rectangle.
-alignas(16) u16 gradientTexture[PPU_H][4];
+// fill a TMEM line, stretched across the screen by a single rectangle. One
+// per world, like the palettes.
+alignas(16) u16 gradientTextures[tng::WORLD_COUNT][PPU_H][4];
+u16 (*gradientTexture)[4] = gradientTextures[0];
 
 // Once per world per frame: everything its region passes share
 void ppuPrepareWorld() {
@@ -1408,6 +1414,10 @@ void ppuPrepareWorld() {
     memset(spriteTileState, 0, sizeof(spriteTileState));
 
     buildSpriteLists();
+    const int w = ppuCurrentWorld();
+    tlutBg = tlutBgs[w];
+    tlutSprite = tlutSprites[w];
+    gradientTexture = gradientTextures[w];
     buildTlut(tlutBg, tng::world->palettes[tng::PALETTE_BG]);
     buildTlut(tlutSprite, tng::world->palettes[tng::PALETTE_SPRITE]);
     if (tng::world->gradientEnabled) {
@@ -1442,10 +1452,12 @@ void selectRegion(const PpuRegion& r) {
 // sprites take turns in TMEM) are swapped as often as for one region.
 // Tiles and sprites outside a region are skipped. Call ppuPrepareWorld()
 // first.
-void ppuRenderRegions(const PpuRegion* regions, int count) {
+void ppuRenderRegions(const PpuRegion* regions, int count, bool backdrop) {
     resetRdpState();
 
-    if (tng::world->gradientEnabled) {
+    if (!backdrop) {
+        rdpq_set_mode_standard();
+    } else if (tng::world->gradientEnabled) {
         rdpq_set_mode_standard();
         surface_t gradient =
             surface_make_linear(gradientTexture, FMT_RGBA16, 4, PPU_H);
@@ -1495,6 +1507,36 @@ void ppuRenderRegions(const PpuRegion* regions, int count) {
             }
         }
     }
+}
+
+// Fills a framebuffer rectangle with the current world's backdrop, its line 0
+// at framebuffer line lineY; above and below the GBA screen the first and
+// last colours carry on. Call ppuPrepareWorld() first.
+void ppuRenderBackdrop(int x0, int y0, int x1, int y1, int lineY) {
+    rdpq_set_scissor(x0, y0, x1, y1);
+    // the scissor cache holds GBA coordinates, see selectRegion()
+    scissor = {-1, -1, -1, -1};
+
+    if (!tng::world->gradientEnabled) {
+        rdpq_set_mode_fill(
+            color_from_packed16(tng::world->palettes[tng::PALETTE_BG][0][0]));
+        rdpq_fill_rectangle(x0, y0, x1, y1);
+        return;
+    }
+
+    rdpq_set_mode_standard();
+    surface_t gradient =
+        surface_make_linear(gradientTexture, FMT_RGBA16, 4, PPU_H);
+    rdpq_tex_upload(TILE_DRAW, &gradient, NULL);
+    const int top = lineY, bottom = lineY + PPU_H;
+    // a texture step of 0 repeats one line of the gradient
+    if (y0 < top)
+        rdpq_texture_rectangle_scaled(TILE_DRAW, x0, y0, x1, top, 0, 0, 0, 0);
+    rdpq_texture_rectangle_scaled(TILE_DRAW, x0, top, x1, bottom, 0, 0, 0,
+                                  PPU_H);
+    if (y1 > bottom)
+        rdpq_texture_rectangle_scaled(TILE_DRAW, x0, bottom, x1, y1, 0,
+                                      PPU_H - 1, 0, PPU_H - 1);
 }
 
 // The whole GBA screen with its top-left corner at (ox, oy)

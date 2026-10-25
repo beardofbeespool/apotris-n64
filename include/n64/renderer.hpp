@@ -146,5 +146,10 @@ struct PpuRegion {
 // Per world, once per frame, before rendering any of it
 void ppuPrepareWorld();
 
-// Renders regions of the current world in one pass (rdpq attached)
-void ppuRenderRegions(const PpuRegion* regions, int count);
+// Renders regions of the current world in one pass (rdpq attached). Without
+// backdrop, only the layers and sprites (see ppuRenderBackdrop())
+void ppuRenderRegions(const PpuRegion* regions, int count, bool backdrop = true);
+
+// Fills a framebuffer rectangle with the current world's backdrop gradient,
+// its first line at framebuffer line lineY, carried on above and below
+void ppuRenderBackdrop(int x0, int y0, int x1, int y1, int lineY);

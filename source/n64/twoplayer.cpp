@@ -48,6 +48,27 @@ constexpr Piece PIECES[] = {
 };
 
 constexpr int SCREEN_W = 320;
+
+// Each half is backed by its player's backdrop gradient in one piece, as in
+// single player, rather than a strip behind each piece: from the outermost
+// piece to the middle of the screen, the gradient lined up with the board
+// (PIECES[0], which shows the whole height of the GBA screen).
+struct Backdrop {
+    int x0, y0, y1;
+};
+
+constexpr Backdrop backdropArea() {
+    Backdrop b = {SCREEN_W / 2, 240, 0};
+    for (const Piece& piece : PIECES) {
+        b.x0 = piece.x < b.x0 ? piece.x : b.x0;
+        b.y0 = piece.y < b.y0 ? piece.y : b.y0;
+        const int bottom = piece.y + piece.y1 - piece.y0;
+        b.y1 = bottom > b.y1 ? bottom : b.y1;
+    }
+    return b;
+}
+
+constexpr Backdrop BACKDROP = backdropArea();
 // Swaps every per-player global with its stash. With two players, one set is
 // live and the other stashed, so one swap switches between them.
 void swapPlayerState() {
@@ -322,7 +343,14 @@ void n64RenderTwoPlayer() {
             const int x = p == 0 ? piece.x : SCREEN_W - piece.x - w;
             regions[n++] = {piece.x0, piece.y0, piece.x1, piece.y1, x, piece.y};
         }
-        ppuRenderRegions(regions, n);
+        const int x0 = p == 0 ? BACKDROP.x0 : SCREEN_W / 2;
+        const int x1 = p == 0 ? SCREEN_W / 2 : SCREEN_W - BACKDROP.x0;
+        ppuRenderBackdrop(x0, BACKDROP.y0, x1, BACKDROP.y1, PIECES[0].y);
+        // a player in their pause menu shows just the board: the menu's
+        // other lines (song name, hints) are placed for the full GBA screen
+        // and would land in the hold, queue and timer boxes
+        const bool pausing = depth > 0 && paused && p == livePlayer;
+        ppuRenderRegions(regions, pausing ? 1 : n, false);
     }
     ppuSelectWorld(livePlayer);
 }

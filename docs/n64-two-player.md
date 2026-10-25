@@ -136,6 +136,14 @@ player is unchanged.
   (`PpuRegion`): board, hold box, queue, timer and attack bar. They are placed
   inside the CRT safe area, player 2's mirrored, so nothing is lost at the
   edges of the TV.
+- Backdrop: each half is filled with its player's gradient in one piece
+  (`ppuRenderBackdrop()`), lined up with the board and carried on above and
+  below it, and the pieces are drawn on top without a backdrop of their own.
+  A player in their pause menu shows only the board, since the menu's other
+  lines are placed for the whole GBA screen.
+- Each world has its own palette (TLUT) and gradient buffers: the RDP reads
+  one world's while the CPU prepares the other's, and shared buffers made a
+  board flicker in the other player's colours (seen when one player paused).
 - Speed: `ppuRenderRegions()` draws all of a world's regions in one pass, layer
   by layer, so the palette (TLUT) is loaded only when it changes; rotated and
   scaled sprites are cached between frames, keyed by their tiles' version
@@ -149,5 +157,4 @@ as before (compare build).
 ## Next
 
 - Player 2's own button mapping.
-- Pause and result text are wider than the board and spill into the side
-  columns.
+- A thin bar sometimes shows between the hold box and the board.
