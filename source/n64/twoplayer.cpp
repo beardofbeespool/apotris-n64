@@ -23,6 +23,8 @@
 extern void ppuCopyWorld(int from, int to);
 
 bool n64TwoPlayerRequested = false;
+bool n64CpuOpponent = false;
+bool n64PauseMenuOpen = false;
 
 namespace {
 
@@ -50,26 +52,7 @@ constexpr Piece PIECES[] = {
 
 constexpr int SCREEN_W = 320;
 
-// Each half is backed by its player's backdrop gradient in one piece, as in
-// single player, rather than a strip behind each piece: from the outermost
-// piece to the middle of the screen, the gradient lined up with the board
-// (PIECES[0], which shows the whole height of the GBA screen).
-struct Backdrop {
-    int x0, y0, y1;
-};
-
-constexpr Backdrop backdropArea() {
-    Backdrop b = {SCREEN_W / 2, 240, 0};
-    for (const Piece& piece : PIECES) {
-        b.x0 = piece.x < b.x0 ? piece.x : b.x0;
-        b.y0 = piece.y < b.y0 ? piece.y : b.y0;
-        const int bottom = piece.y + piece.y1 - piece.y0;
-        b.y1 = bottom > b.y1 ? bottom : b.y1;
-    }
-    return b;
-}
-
-constexpr Backdrop BACKDROP = backdropArea();
+constexpr int SCREEN_H = 240;
 // Swaps every per-player global with its stash. With two players, one set is
 // live and the other stashed, so one swap switches between them.
 void swapPlayerState() {
@@ -151,6 +134,14 @@ public:
             const BlockEngine::Options& options = *previousGameOptions;
             game = new BlockEngine::Game(options.mode, seed, options.bigMode);
             game->setOptions(options);
+            if (n64CpuOpponent) {
+                // as startBotGame() sets up the CPU's game in single player
+                game->setGoal(100);
+                game->setLevel(1);
+                game->maxClearDelay = 20;
+                delete testBot;
+                testBot = new BlockEngine::Bot(game);
+            }
             games[1] = game;
 
             players[1] = new GameScene();
@@ -165,6 +156,11 @@ public:
         }
 
         forBothPlayers([&](int p) {
+            // the CPU plays once the countdown is over, between line clears,
+            // as in single player
+            if (n64CpuOpponent && p == 1 && countdownDone && !game->clearLock &&
+                !game->lost)
+                testBot->run();
             players[p]->update();
             // a restart from the pause menu replaces the player's game
             games[p] = game;
@@ -266,6 +262,7 @@ public:
         if (depth > 0) {
             players[livePlayer]->draw();
             ppuSnapshotGradient();
+            n64SnapshotBoardCaps();
             return;
         }
 
@@ -273,6 +270,7 @@ public:
         forBothPlayers([&](int p) {
             players[p]->draw();
             ppuSnapshotGradient();
+            n64SnapshotBoardCaps();
         });
     }
 
@@ -282,6 +280,11 @@ public:
         asPlayer(1, [&] {
             delete players[1];
             players[1] = nullptr;
+            if (n64CpuOpponent) {
+                // the bot plays this game
+                delete testBot;
+                testBot = nullptr;
+            }
             delete game;
             game = nullptr;
         });
@@ -314,6 +317,7 @@ void n64SwitchPlayer(int player) {
     swapPlayerState();
     ppuSelectWorld(player);
     n64SetInputPort(player);
+    n64SetInputMuted(n64CpuOpponent && player == 1);
     livePlayer = player;
 }
 
@@ -344,14 +348,19 @@ void n64RenderTwoPlayer() {
             const int x = p == 0 ? piece.x : SCREEN_W - piece.x - w;
             regions[n++] = {piece.x0, piece.y0, piece.x1, piece.y1, x, piece.y};
         }
-        const int x0 = p == 0 ? BACKDROP.x0 : SCREEN_W / 2;
-        const int x1 = p == 0 ? SCREEN_W / 2 : SCREEN_W - BACKDROP.x0;
-        ppuRenderBackdrop(x0, BACKDROP.y0, x1, BACKDROP.y1, PIECES[0].y);
+        // Each half is backed by its player's backdrop gradient in one
+        // piece, as in single player, to the edges of the screen (overscan
+        // crops only gradient), lined up with the board
+        const PpuRegion& board = regions[0];
+        ppuRenderBackdrop(p == 0 ? 0 : SCREEN_W / 2, 0,
+                          p == 0 ? SCREEN_W / 2 : SCREEN_W, SCREEN_H, board.dy);
         // a player in their pause menu shows just the board: the menu's
         // other lines (song name, hints) are placed for the full GBA screen
         // and would land in the hold, queue and timer boxes
-        const bool pausing = depth > 0 && paused && p == livePlayer;
+        const bool pausing = depth > 0 && n64PauseMenuOpen && p == livePlayer;
         ppuRenderRegions(regions, pausing ? 1 : n, false);
+        ppuRenderBoardCaps(board.dx - board.x0, board.dy - board.y0, SCREEN_W,
+                           SCREEN_H);
     }
     ppuSelectWorld(livePlayer);
 }

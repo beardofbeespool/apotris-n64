@@ -112,6 +112,23 @@ struct World {
     // world was last drawn, see ppuSnapshotGradient()
     u16 gradient[160];
     bool gradientEnabled;
+
+    // Caps that close the board's frame where the board runs off the top
+    // and bottom of the GBA screen, drawn where the N64 shows more than it
+    // (see ppuRenderBoardCaps()). The game says where they go; their colours
+    // are read back from the frame as it was last drawn.
+    struct BoardCaps {
+        bool top = false, bottom = false;
+        int x0 = 0, x1 = 0;     // the frame's outer edges, x1 exclusive
+        bool fromRight = false; // read the colours from the right side
+        int sampleY = 0;        // and on this line (GBA screen)
+
+        // from the outermost line of the frame in (RGBA5551)
+        u16 colors[4] = {};
+        bool colorsRead = false;
+        // where the GBA screen was last drawn on the framebuffer
+        int originX = 0, originY = 0;
+    } caps;
 };
 
 constexpr int WORLD_COUNT = 2;
@@ -137,6 +154,9 @@ int ppuCurrentWorld();
 // can be rendered later without the rest of its player's state
 void ppuSnapshotGradient();
 
+// Notes in the current world where the board's caps go (game.cpp)
+void n64SnapshotBoardCaps();
+
 // A rectangle of a world's GBA screen and where it goes on the framebuffer
 struct PpuRegion {
     int x0, y0, x1, y1;     // on the GBA screen
@@ -153,3 +173,12 @@ void ppuRenderRegions(const PpuRegion* regions, int count, bool backdrop = true)
 // Fills a framebuffer rectangle with the current world's backdrop gradient,
 // its first line at framebuffer line lineY, carried on above and below
 void ppuRenderBackdrop(int x0, int y0, int x1, int y1, int lineY);
+
+// Draws the current world's board caps, with the GBA screen's top-left at
+// (originX, originY) on a framebuffer of w x h
+void ppuRenderBoardCaps(int originX, int originY, int w, int h);
+
+// Reads the current world's frame colours for its caps from the finished
+// framebuffer (the RDP done with it), for the next frame
+struct surface_s;
+void ppuReadBoardCaps(const struct surface_s* framebuffer);

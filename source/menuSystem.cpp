@@ -28,6 +28,47 @@ void fadeFromBlack();
 
 static COLOR* preTransitionPalette = nullptr;
 
+#ifdef APOTRIS_N64
+#include "n64/renderer.hpp"
+#include "n64/twoplayer.hpp"
+
+// Two players each have a world with its own palettes, and which one is
+// current changes with every frame drawn, so a fade goes over all of them,
+// each from its own saved palette (preTransitionPalette holds one per world)
+constexpr int FADE_WORLDS = tng::WORLD_COUNT;
+
+template <typename F> void forEachWorld(F fn) {
+    if (!n64TwoPlayerActive()) {
+        fn(0);
+        return;
+    }
+    const int current = ppuCurrentWorld();
+    for (int w = 0; w < FADE_WORLDS; w++) {
+        ppuSelectWorld(w);
+        fn(w);
+    }
+    ppuSelectWorld(current);
+}
+#else
+constexpr int FADE_WORLDS = 1;
+
+template <typename F> void forEachWorld(F fn) { fn(0); }
+#endif
+
+static void savePalettes() {
+    if (preTransitionPalette != nullptr)
+        delete[] preTransitionPalette;
+    preTransitionPalette = new COLOR[512 * FADE_WORLDS];
+    forEachWorld([](int w) { savePalette(&preTransitionPalette[512 * w]); });
+}
+
+static void fadePalettes(COLOR color, int alpha) {
+    forEachWorld([&](int w) {
+        color_fade_palette(0, 1, &preTransitionPalette[512 * w + 1], color, 511,
+                           alpha);
+    });
+}
+
 Transitions transition;
 std::function<Scene*()> factory;
 static bool sceneSwitch = false;
@@ -95,11 +136,7 @@ void switchScene() {
 }
 
 void fadeToBlack() {
-
-    if (preTransitionPalette != nullptr)
-        delete[] preTransitionPalette;
-    preTransitionPalette = new COLOR[512];
-    savePalette(preTransitionPalette);
+    savePalettes();
 
     int color = 0;
 
@@ -109,31 +146,26 @@ void fadeToBlack() {
     int timer = 0;
     while (closed() && timer++ < FADE_LENGTH) {
         vsync();
-        color_fade_palette(0, 1, &preTransitionPalette[1], color, 511,
-                           timer * 8);
+        fadePalettes(color, timer * 8);
     }
 }
 
 void fadeFromBlack() {
     int timer = FADE_LENGTH;
 
-    if (preTransitionPalette != nullptr)
-        delete[] preTransitionPalette;
-    preTransitionPalette = new COLOR[512];
-    savePalette(preTransitionPalette);
+    savePalettes();
 
     int color = 0;
 
     if (savefile->settings.lightMode)
         color = 0x5ad6;
 
-    color_fade_palette(0, 1, &preTransitionPalette[1], color, 511, timer * 8);
+    fadePalettes(color, timer * 8);
 
     while (closed() && timer >= 0) {
         canDraw = 1;
         vsync();
-        color_fade_palette(0, 1, &preTransitionPalette[1], color, 511,
-                           timer * 8);
+        fadePalettes(color, timer * 8);
         timer--;
     }
 }

@@ -20,6 +20,10 @@ void n64SwitchPlayer(int player);
 // opens the split screen instead of a normal game
 extern bool n64TwoPlayerRequested;
 
+// Player 2 is the CPU (CPU Battle): the bot plays their game and controller 2
+// is ignored. Set together with n64TwoPlayerRequested.
+extern bool n64CpuOpponent;
+
 Scene* n64CreateSplitScene();
 
 // Renders both players' halves of the screen (rdpq attached to it)
@@ -35,11 +39,17 @@ void n64TwoPlayerGameOver();
 bool n64TwoPlayerCountdownDone();
 void n64TwoPlayerCountdownFinished();
 
+// The live player's pause menu is open (menus.cpp)
+extern bool n64PauseMenuOpen;
+
 // Restart both games at the end of the current frame (pause menu)
 void n64TwoPlayerRestart();
 
 // Which controller the game's key functions read (liba_n64.cpp)
 void n64SetInputPort(int port);
+
+// While muted, the game's key functions see no buttons (the CPU's turn)
+void n64SetInputMuted(bool muted);
 
 // The per-player globals of each source file (see n64/player_state.hpp)
 void n64SwapGameScreenState();

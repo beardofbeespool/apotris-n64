@@ -443,7 +443,9 @@ void PlayOptionScene::start() {
               (savefile->settings.pro);
 
 #ifdef APOTRIS_N64
-    n64TwoPlayerRequested = (name() == "2P Battle");
+    // CPU Battle is split screen too, with the bot playing player 2's board
+    n64CpuOpponent = (name() == "CPU Battle");
+    n64TwoPlayerRequested = n64CpuOpponent || (name() == "2P Battle");
 #endif
     startGame(newOptions, (int)randNext());
 

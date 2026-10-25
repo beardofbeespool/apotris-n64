@@ -685,6 +685,13 @@ void GameScene::showStats(bool moreStats, const std::string& time,
 }
 
 int GameScene::pauseMenu() {
+#ifdef APOTRIS_N64
+    // the split screen shows only this player's board while the menu is open
+    struct MenuOpen {
+        MenuOpen() { n64PauseMenuOpen = true; }
+        ~MenuOpen() { n64PauseMenuOpen = false; }
+    } menuOpen;
+#endif
     pauseSong();
 
     int selection = 0;

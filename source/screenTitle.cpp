@@ -71,7 +71,11 @@ std::unique_ptr<Settings> previousSettings = nullptr;
 bool bigMode = false;
 
 const std::list<std::string> menuOptions = {
-    "Play",        "Settings",     "Stats",  "Links",
+    "Play",        "Settings",     "Stats",
+#ifndef APOTRIS_N64
+    // web links (QR codes): no use on a console without a browser
+    "Links",
+#endif
     "Skin Editor", "Color Editor", "Credits"};
 const std::list<std::string> gameOptions = {
     "Marathon",     "Sprint",  "Dig",    "Ultra", "Blitz", "Combo",

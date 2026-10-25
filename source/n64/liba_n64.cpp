@@ -45,11 +45,60 @@ int blendInfo = 0;
 
 namespace {
 
-// The GBA picture is 240x160; centre it on the 320x240 output for now.
+// Two ways to show the 240x160 GBA picture (Settings > Video > Screen):
+//
+// - Full: a 240x180 framebuffer, the picture with the backdrop carried on
+//   for 10 lines above and below. That is 4:3, so the VI stretches it over
+//   the whole TV with square pixels, inside a 5% margin for CRT overscan.
+//   The stretch is not a whole number of lines, so the VI smooths it.
+// - Sharp: a 320x240 framebuffer with the picture in the middle, pixel for
+//   pixel and unfiltered, with black around it.
+//
+// Two-player draws its own 320x240 layout (n64/twoplayer.cpp) the sharp way.
+enum class Screen { SHARP, FULL };
+
 constexpr int OUT_W = 320;
 constexpr int OUT_H = 240;
 constexpr int ORIGIN_X = (OUT_W - SCREEN_WIDTH) / 2;
 constexpr int ORIGIN_Y = (OUT_H - SCREEN_HEIGHT) / 2;
+
+constexpr int FULL_W = SCREEN_WIDTH;
+constexpr int FULL_H = SCREEN_WIDTH * 3 / 4;
+constexpr int FULL_Y = (FULL_H - SCREEN_HEIGHT) / 2;
+
+Screen screen = Screen::SHARP;
+
+void initDisplay(Screen s) {
+    // Two framebuffers, as a third would only queue frames and add a frame
+    // of input lag
+    if (s == Screen::FULL) {
+        const resolution_t full = {.width = FULL_W,
+                                   .height = FULL_H,
+                                   .interlaced = INTERLACE_OFF,
+                                   .aspect_ratio = 4.0f / 3.0f,
+                                   .overscan_margin = VI_CRT_MARGIN};
+        display_init(full, DEPTH_16_BPP, 2, GAMMA_NONE, FILTERS_RESAMPLE);
+    } else {
+        display_init(RESOLUTION_320x240, DEPTH_16_BPP, 2, GAMMA_NONE,
+                     FILTERS_DISABLED);
+    }
+    screen = s;
+}
+
+Screen wantedScreen() {
+#if defined(APOTRIS_N64_CPU_PPU) || defined(APOTRIS_N64_PPU_COMPARE)
+    // the CPU picture is drawn for the sharp layout
+    return Screen::SHARP;
+#else
+    if (n64TwoPlayerActive())
+        return Screen::SHARP;
+    // settings.fullscreen is otherwise unused on N64: 0 (the default) fills
+    // the TV, 1 is the sharp picture
+    if (savefile != nullptr && savefile->settings.fullscreen)
+        return Screen::SHARP;
+    return Screen::FULL;
+#endif
+}
 
 #ifdef APOTRIS_N64_PPU_COMPARE
 // Test build: draws every frame on the CPU as well, and logs any pixel where
@@ -169,6 +218,7 @@ constexpr int INPUT_PORTS = 2;
 joypad_inputs_t directInput[INPUT_PORTS];
 bool directInputValid[INPUT_PORTS] = {};
 int inputPort = 0;
+bool inputMuted = false;
 
 // Reads the first `ports` controllers right now, in one transaction
 // (libdragon only reads the controllers at vblank). A port that does not
@@ -310,11 +360,8 @@ void platformInit() {
     debug_init_isviewer();
     debug_init_usblog();
 
-    // 240p, as sharp as possible: no VI filtering, so every pixel lands on
-    // the CRT as drawn. Two framebuffers, as a third would only queue frames
-    // and add a frame of input lag.
-    display_init(RESOLUTION_320x240, DEPTH_16_BPP, 2, GAMMA_NONE,
-                 FILTERS_DISABLED);
+    // 240p, never interlaced, so there is no flicker on a CRT
+    initDisplay(wantedScreen());
     joypad_init();
     rdpq_init();
 
@@ -383,6 +430,19 @@ void vsync() {
 
     onVBlank();
 
+    // The screen changes between single player and two-player, and with the
+    // setting: hand back the framebuffer (blank) and start over
+    if (wantedScreen() != screen) {
+        if (framebuffer != nullptr) {
+            rdpq_attach_clear(framebuffer, NULL);
+            rdpq_detach_show();
+            rspq_wait();
+        }
+        display_close();
+        initDisplay(wantedScreen());
+        framebuffer = nullptr;
+    }
+
     if (framebuffer == nullptr)
         framebuffer = display_get();
 
@@ -405,9 +465,19 @@ void vsync() {
     rdpq_attach_clear(framebuffer, NULL);
     if (n64TwoPlayerActive()) {
         n64RenderTwoPlayer();
+    } else if (screen == Screen::FULL) {
+        ppuSnapshotGradient();
+        n64SnapshotBoardCaps();
+        ppuPrepareWorld();
+        ppuRenderBackdrop(0, 0, FULL_W, FULL_H, FULL_Y);
+        const PpuRegion all = {0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, 0, FULL_Y};
+        ppuRenderRegions(&all, 1, false);
+        ppuRenderBoardCaps(0, FULL_Y, FULL_W, FULL_H);
     } else {
         ppuSnapshotGradient();
+        n64SnapshotBoardCaps();
         ppuRenderFrameRdp(ORIGIN_X, ORIGIN_Y);
+        ppuRenderBoardCaps(ORIGIN_X, ORIGIN_Y, OUT_W, OUT_H);
     }
     rdpq_detach_show();
 #endif
@@ -416,6 +486,20 @@ void vsync() {
     uint32_t rdpWaitStart = get_ticks();
     rspq_wait();
     uint32_t rdpWaitTicks = get_ticks() - rdpWaitStart;
+
+#ifndef APOTRIS_N64_CPU_PPU
+    // the board caps' colours for the next frame, from this one
+    if (n64TwoPlayerActive()) {
+        const int current = ppuCurrentWorld();
+        for (int w = 0; w < tng::WORLD_COUNT; w++) {
+            ppuSelectWorld(w);
+            ppuReadBoardCaps(framebuffer);
+        }
+        ppuSelectWorld(current);
+    } else {
+        ppuReadBoardCaps(framebuffer);
+    }
+#endif
 
     // Audio after the picture: the mixer runs on the RSP, which also passes
     // the drawing commands to the RDP, so mixing during drawing slows it down
@@ -470,10 +554,12 @@ s16 sinLut(int angle) {
 
 void n64SetInputPort(int port) { inputPort = port; }
 
+void n64SetInputMuted(bool muted) { inputMuted = muted; }
+
 void key_poll() {
     joypad_poll();
     previousKeys[inputPort] = currentKeys[inputPort];
-    currentKeys[inputPort] = readPad();
+    currentKeys[inputPort] = inputMuted ? 0 : readPad();
 }
 
 uint32_t key_is_down(uint32_t key) { return currentKeys[inputPort] & key; }

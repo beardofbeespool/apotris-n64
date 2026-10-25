@@ -156,6 +156,30 @@ Checked in ares: same pieces for both, garbage both ways, WIN/LOSE and the
 tally, Retry and Quit, either player pausing, and single player pixel for pixel
 as before (compare build).
 
+## Phase 4 (done): full screen, CPU Battle, fixes
+
+- Single player can fill the TV (Settings > Video > Screen, see the README).
+  Two-player keeps its 320x240 layout, unfiltered, with the backdrop now
+  covering the whole screen.
+- Board caps: the frame of each board is closed above and below
+  (`ppuRenderBoardCaps()`). The game notes where (`n64SnapshotBoardCaps()`,
+  next to `ppuSnapshotGradient()`); the colours are read back from the
+  finished framebuffer after each frame, as the frame is background tiles or
+  sprites depending on mode and skin.
+- CPU Battle runs in `SplitScene` with `n64CpuOpponent` set: player 2's game
+  is set up as `startBotGame()` sets up the CPU's game, `testBot` plays it
+  (from the end of the countdown, between line clears), and controller 2 is
+  muted (`n64SetInputMuted()`).
+- Player 1's colours were dimmer than player 2's: the scene fades ran on the
+  current world, and drawing a frame leaves the other player's world current
+  (one state swap per frame instead of two), so the steps of a fade
+  alternated between the worlds and player 1's never got the last one. The
+  fades now go over every world, each from its own saved palette.
+- The countdown is a loop of its own with `paused` set, so the rule that
+  shows only a paused player's board now keys off the pause menu itself
+  (`n64PauseMenuOpen`). Player 2's backdrop is set up when the countdown
+  starts, instead of staying black until GO.
+
 ## Next
 
 - Player 2's own button mapping.

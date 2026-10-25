@@ -100,6 +100,29 @@ public:
 
 #else /* N3DS */
 
+#ifdef APOTRIS_N64
+// Fill the TV (the VI stretches the picture, a little soft) or show the GBA
+// picture pixel for pixel in the middle of the screen. Kept in
+// settings.fullscreen, which N64 has no other use for: 0, the default, fills.
+class N64ScreenElement : public Element {
+public:
+    std::string getLabel() override { return "Screen"; }
+
+    std::string getCursor(std::string text) override {
+        return "<" + text + ">";
+    }
+
+    void action(int dir) override {
+        savefile->settings.fullscreen = !savefile->settings.fullscreen;
+        sfx(SFX_MENUCONFIRM);
+    }
+
+    std::string getCurrentOption() override {
+        return savefile->settings.fullscreen ? "Sharp" : "Full";
+    }
+};
+#endif
+
 class IntegerScaleElement : public Element {
 public:
     std::string getLabel() override { return "Integer Scale"; }
@@ -421,6 +444,8 @@ public:
         list.push_back(new ScaleSelectElement(n3ds::ScaleMode::SCALED_SHARP));
         list.push_back(new ScaleSelectElement(n3ds::ScaleMode::SCALED_ULTRA));
         list.push_back(new LabelElement("Diagnostics:"));
+#elif defined(APOTRIS_N64)
+        list.push_back(new N64ScreenElement());
 #else
         list.push_back(new IntegerScaleElement());
         list.push_back(new ScaleElement());

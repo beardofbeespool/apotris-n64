@@ -1539,6 +1539,48 @@ void ppuRenderBackdrop(int x0, int y0, int x1, int y1, int lineY) {
                                       PPU_H - 1, 0, PPU_H - 1);
 }
 
+// Each line of the frame turns the corner: line k runs across at k pixels
+// from the cap's outer edge, from the frame's line k on the left to its
+// line k on the right. Drawn outermost first, each inner line over the last.
+void ppuRenderBoardCaps(int originX, int originY, int w, int h) {
+    auto& caps = tng::world->caps;
+    caps.originX = originX;
+    caps.originY = originY;
+    if ((!caps.top && !caps.bottom) || !caps.colorsRead)
+        return;
+
+    rdpq_set_scissor(0, 0, w, h);
+    // the scissor cache holds GBA coordinates, see selectRegion()
+    scissor = {-1, -1, -1, -1};
+
+    for (int k = 0; k < 4; k++) {
+        rdpq_set_mode_fill(color_from_packed16(caps.colors[k]));
+        const int x0 = originX + caps.x0 + k, x1 = originX + caps.x1 - k;
+        if (caps.top)
+            rdpq_fill_rectangle(x0, originY - 4 + k, x1, originY);
+        if (caps.bottom)
+            rdpq_fill_rectangle(x0, originY + PPU_H, x1, originY + PPU_H + 4 - k);
+    }
+}
+
+void ppuReadBoardCaps(const surface_t* framebuffer) {
+    auto& caps = tng::world->caps;
+    if (!caps.top && !caps.bottom) {
+        caps.colorsRead = false;
+        return;
+    }
+    // The frame may be background tiles or sprites depending on the mode
+    // and skin; the finished picture has it either way
+    const u8* pixels = (const u8*)UncachedAddr(framebuffer->buffer);
+    const int y = caps.originY + caps.sampleY;
+    const u16* line = (const u16*)(pixels + y * framebuffer->stride);
+    for (int k = 0; k < 4; k++) {
+        const int x = caps.fromRight ? caps.x1 - 1 - k : caps.x0 + k;
+        caps.colors[k] = line[caps.originX + x];
+    }
+    caps.colorsRead = true;
+}
+
 // The whole GBA screen with its top-left corner at (ox, oy)
 void ppuRenderFrameRdp(int ox, int oy) {
     ppuPrepareWorld();

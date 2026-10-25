@@ -1932,6 +1932,18 @@ void GameScene::countdown() {
 
     showBackground(0);
 
+#ifdef APOTRIS_N64
+    // the other board's backdrop is on during the countdown too (its own
+    // countdown only runs, and ends, on GO)
+    if (twoPlayerLead)
+        n64AsOtherPlayer([&] {
+            if (!game->zoneTimer)
+                gradient(1);
+            ppuSnapshotGradient();
+            n64SnapshotBoardCaps();
+        });
+#endif
+
     paused = true;
 
     GameKeys k = savefile->settings.keys;
@@ -4570,4 +4582,32 @@ void showSpawn() {
     X(attackBarLastWasEmpty) X(attackBarLastLayer)
 
 N64_PLAYER_STATE(n64SwapGameScreenState, N64_GAME_SCREEN_STATE)
+
+#include "n64/renderer.hpp"
+
+void n64SnapshotBoardCaps() {
+    auto& caps = tng::world->caps;
+    // in a game (two-player runs one GameScene per player under its own)
+    const bool inGame = dynamic_cast<GameScene*>(scene) != nullptr ||
+                        n64TwoPlayerActive();
+    if (game == nullptr || !inGame) {
+        caps.top = caps.bottom = false;
+        return;
+    }
+
+    // the board is 20 rows of 8 pixels with a 4-pixel frame either side; on
+    // the GBA its top is off the screen, and so is its bottom unless the
+    // layout puts it higher (then the frame has corners of its own)
+    const Position pos = gameLayout[(int)GameElements::FIELD];
+    caps.x0 = pos.x - 4;
+    caps.x1 = pos.x + 10 * 8 + 4;
+    caps.top = pos.y <= 0;
+    caps.bottom = pos.y + 20 * 8 >= SCREEN_HEIGHT;
+
+    // the colours come from the side without a meter (in battle the
+    // incoming garbage, otherwise the mode's progress), near the top, where
+    // little else is drawn over the frame
+    caps.fromRight = game->gameMode == BATTLE;
+    caps.sampleY = std::max<int>(pos.y, 0) + 2;
+}
 #endif
