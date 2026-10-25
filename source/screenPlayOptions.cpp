@@ -442,11 +442,11 @@ void PlayOptionScene::start() {
     proMode = (key_is_down(k.special1) || key_is_down(k.special2)) ^
               (savefile->settings.pro);
 
-    startGame(newOptions, (int)randNext());
-
 #ifdef APOTRIS_N64
     n64TwoPlayerRequested = (name() == "2P Battle");
 #endif
+    startGame(newOptions, (int)randNext());
+
     gameLoop();
 }
 

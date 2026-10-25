@@ -1,4 +1,7 @@
 #include "sceneModes.hpp"
+#ifdef APOTRIS_N64
+#include "n64/twoplayer.hpp"
+#endif
 #include <string>
 
 #include "blockEngine.hpp"
@@ -1295,7 +1298,12 @@ void startGame(BlockEngine::Options options, int seed) {
 
         delete testBot;
         testBot = new Bot(game);
-    } else if (options.mode == BATTLE && !multiplayer) {
+    } else if (options.mode == BATTLE && !multiplayer
+#ifdef APOTRIS_N64
+               // two players: the other player is the opponent
+               && !n64TwoPlayerRequested
+#endif
+    ) {
         startBotGame(seed);
     }
 #endif
@@ -1640,7 +1648,7 @@ HSV_COLOR rgb2hsv(int r, int g, int b) {
 
 // N64 two-player: per-player state kept in main.cpp (docs/n64-two-player.md)
 #define N64_MAIN_STATE(X)                                                      \
-    X(shake) X(gameSeconds) X(gradientTable) X(gradientEnabled)
+    X(shake) X(gameSeconds) X(gradientTable) X(gradientEnabled) X(paused)
 
 N64_PLAYER_STATE(n64SwapMainState, N64_MAIN_STATE)
 #endif

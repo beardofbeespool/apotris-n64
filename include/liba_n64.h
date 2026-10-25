@@ -212,6 +212,8 @@ constexpr int max(int a, int b) { return (a > b) ? a : b; }
 
 INLINE void setSpriteTile(int index, u8 tx, u8 ty, u8 width, const void* src) {
     memcpy32(&tng::world->sprite_tile_images[index + ty * width + tx], src, 8);
+    tng::world->sprite_tile_version[(index + ty * width + tx) &
+                                    (tng::SPRITE_TILE_COUNT - 1)]++;
 
 }
 
@@ -221,6 +223,8 @@ INLINE void setSpritePixel(int index, u8 tx, u8 ty, u8 width, u8 x, u8 y,
 
     const u32 shift = x * 4;
     t->rows[y] = (t->rows[y] & ~(0xfu << shift)) | ((color & 0xfu) << shift);
+    tng::world->sprite_tile_version[(index + ty * width + tx) &
+                                    (tng::SPRITE_TILE_COUNT - 1)]++;
 
 }
 
@@ -228,6 +232,7 @@ INLINE void setSpriteTileRow(int index, int y, int n) {
     tng::ImageTile* tile = &tng::world->sprite_tile_images[index];
 
     tile->rows[y] |= n;
+    tng::world->sprite_tile_version[index & (tng::SPRITE_TILE_COUNT - 1)]++;
 
 }
 

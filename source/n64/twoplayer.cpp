@@ -10,13 +10,16 @@
 #include "def.h"
 #include "prng.h"
 #include "scene.hpp"
+#include "text.h"
+#include "audio_files.h"
 
 #include "n64/renderer.hpp"
 #include "n64/twoplayer.hpp"
 
 #include <libdragon.h>
 
-extern void ppuRenderFrameRdp(int originX, int originY, int viewX0, int viewX1);
+#include <iterator>
+
 extern void ppuCopyWorld(int from, int to);
 
 bool n64TwoPlayerRequested = false;
@@ -26,13 +29,25 @@ namespace {
 bool active = false;
 int livePlayer = 0;
 
-// Each player's half of the 320x240 screen shows this slice of their GBA
-// screen: the hold box, the board and the next queue. They span about 166
-// pixels, so 3 pixels of frame are cut on each side.
-constexpr int VIEW_X0 = 42;
-constexpr int VIEW_WIDTH = 160;
-constexpr int SCREEN_Y = (240 - SCREEN_HEIGHT) / 2;
+// The two-player screen is put together from pieces of each player's GBA
+// screen, all inside the area a CRT shows (overscan crops the outer edges).
+// Each half has the board in the middle of the screen and a column on the
+// outside with the hold box above the next queue; the timer sits above the
+// board and the attack counter below. Player 2's half mirrors player 1's.
+struct Piece {
+    int x0, y0, x1, y1;     // on the player's GBA screen
+    int x, y;               // top-left on the 320x240 screen, player 1
+};
 
+constexpr Piece PIECES[] = {
+    {71, 0, 169, 160, 58, 40},      // board, its frame and the garbage meter
+    {38, 69, 72, 103, 19, 32},      // hold box
+    {171, 8, 207, 152, 18, 70},     // next queue
+    {0, 8, 72, 16, 84, 28},         // timer
+    {0, 136, 72, 152, 84, 204},     // attack counter
+};
+
+constexpr int SCREEN_W = 320;
 // Swaps every per-player global with its stash. With two players, one set is
 // live and the other stashed, so one swap switches between them.
 void swapPlayerState() {
@@ -76,26 +91,45 @@ template <typename F> void forBothPlayers(F fn) {
     }
 }
 
+// Wins so far in this session, shown on the result screen
+int wins[2] = {};
+
+// Set by a player's game screen when its game has ended
+bool gameOverReported = false;
+
+bool countdownDone = false;
+bool restartRequested = false;
+
 class SplitScene : public Scene {
 public:
     Scene* players[2] = {};
+    BlockEngine::Game* games[2] = {};
+
+    bool over = false;
 
     void init() override {
         active = true;
         livePlayer = 0;
+        gameOverReported = false;
+        countdownDone = false;
+        restartRequested = false;
+        // so a retry from the result screen opens the split screen again
+        n64TwoPlayerRequested = true;
 
         // player 1 plays the game startGame() just created
+        games[0] = game;
         players[0] = new GameScene();
         players[0]->init();
 
         // player 2's screen starts from player 1's graphics (font, palettes)
-        // and gets a game of their own with the same options
+        // and gets a game of their own: same options and the same pieces
+        const int seed = game->initSeed;
         ppuCopyWorld(0, 1);
         asPlayer(1, [&] {
             const BlockEngine::Options& options = *previousGameOptions;
-            game = new BlockEngine::Game(options.mode, (int)randNext(),
-                                         options.bigMode);
+            game = new BlockEngine::Game(options.mode, seed, options.bigMode);
             game->setOptions(options);
+            games[1] = game;
 
             players[1] = new GameScene();
             players[1]->init();
@@ -103,10 +137,116 @@ public:
     }
 
     void update() override {
-        forBothPlayers([&](int p) { players[p]->update(); });
+        if (over) {
+            resultInput();
+            return;
+        }
+
+        forBothPlayers([&](int p) {
+            players[p]->update();
+            // a restart from the pause menu replaces the player's game
+            games[p] = game;
+        });
+
+        exchangeGarbage();
+
+        if (restartRequested)
+            restart();
+        else if (gameOverReported)
+            showResult();
+    }
+
+    // A new game for both players (the result screen's retry, or restart in
+    // the pause menu); whatever comes next carries on with player 1's state
+    void restart() {
+        n64SwitchPlayer(0);
+        startGame();
+        gameLoop();
+    }
+
+    // Lines a player clears become garbage on the other player's board, and
+    // a player who tops out loses (as in CPU Battle, without the bot)
+    void exchangeGarbage() {
+        for (int p = 0; p < 2; p++) {
+            BlockEngine::Game* from = games[p];
+            BlockEngine::Game* to = games[p ^ 1];
+            if (!from->attackQueue.empty()) {
+                BlockEngine::Garbage attack = from->attackQueue.front();
+                to->addToGarbageQueue(attack.id, attack.amount);
+                from->clearAttack(attack.id);
+            }
+        }
+        if (games[0]->lost)
+            games[1]->won = true;
+        if (games[1]->lost)
+            games[0]->won = true;
+    }
+
+    // Both games stop; each board says who won, and either player picks
+    // what next
+    void showResult() {
+        over = true;
+
+        int winner = -1;
+        if (games[0]->lost != games[1]->lost)
+            winner = games[0]->lost ? 1 : 0;
+        if (winner != -1)
+            wins[winner]++;
+
+        const Position pos = gameLayout[(int)GameElements::FIELD];
+        const int x = pos.x / 8 + 1, y = pos.y / 8;
+
+        forBothPlayers([&](int p) {
+            clearText();
+            aprint(winner == -1 ? "  DRAW  " : (winner == p ? "  WIN!  " : "  LOSE  "),
+                   x, y + 6);
+            aprint("WINS " + std::to_string(wins[p]), x + 1, y + 9);
+            aprint("A RETRY", x + 1, y + 13);
+            aprint("B QUIT", x + 1, y + 15);
+        });
+
+        sfx(winner == -1 ? SFX_END : SFX_YOUWIN);
+    }
+
+    void resultInput() {
+        bool retry = false, quit = false;
+        forBothPlayers([&](int p) {
+            key_poll();
+            MenuKeys k = savefile->settings.menuKeys;
+            if (key_hit(k.confirm) || key_hit(k.pause))
+                retry = true;
+            else if (key_hit(k.cancel))
+                quit = true;
+        });
+
+        if (!retry && !quit)
+            return;
+
+        if (retry) {
+            sfx(SFX_MENUCONFIRM);
+            restart();
+        } else {
+            sfx(SFX_MENUCANCEL);
+            n64SwitchPlayer(0);
+            wins[0] = wins[1] = 0;
+            changeScene([]() { return new MainMenuScene(); }, Transitions::FADE);
+        }
     }
 
     void draw() override {
+        // once the game is over the boards stay as they ended
+        if (over)
+            return;
+
+        // Inside one player's own loop (their pause menu, the countdown) only
+        // that player is drawn: the other board stays frozen, as their game
+        // does, instead of taking input
+        if (depth > 0) {
+            players[livePlayer]->draw();
+            ppuSnapshotGradient();
+            return;
+        }
+
         // each player's draw also reads that player's controller
         forBothPlayers([&](int p) {
             players[p]->draw();
@@ -157,13 +297,32 @@ void n64SwitchPlayer(int player) {
 
 Scene* n64CreateSplitScene() { return new SplitScene(); }
 
+void n64AsOtherPlayer(const std::function<void()>& fn) {
+    asPlayer(livePlayer ^ 1, fn);
+}
+
+void n64TwoPlayerGameOver() { gameOverReported = true; }
+
+bool n64TwoPlayerCountdownDone() { return countdownDone; }
+
+void n64TwoPlayerCountdownFinished() { countdownDone = true; }
+
+void n64TwoPlayerRestart() { restartRequested = true; }
+
 // Rendering needs only each player's world (which holds a snapshot of their
 // gradient), so it switches worlds without swapping the rest of the state
 void n64RenderTwoPlayer() {
     for (int p = 0; p < 2; p++) {
         ppuSelectWorld(p);
-        ppuRenderFrameRdp(p * VIEW_WIDTH - VIEW_X0, SCREEN_Y, VIEW_X0,
-                          VIEW_X0 + VIEW_WIDTH);
+        ppuPrepareWorld();
+        PpuRegion regions[std::size(PIECES)];
+        int n = 0;
+        for (const Piece& piece : PIECES) {
+            const int w = piece.x1 - piece.x0;
+            const int x = p == 0 ? piece.x : SCREEN_W - piece.x - w;
+            regions[n++] = {piece.x0, piece.y0, piece.x1, piece.y1, x, piece.y};
+        }
+        ppuRenderRegions(regions, n);
     }
     ppuSelectWorld(livePlayer);
 }

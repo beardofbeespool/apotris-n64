@@ -706,11 +706,11 @@ public:
 };
 
 #ifdef APOTRIS_N64
-// Local two-player split-screen. For now each player plays their own
-// Marathon game side by side; battle rules come next.
+// Local two-player split-screen battle: lines cleared send garbage to the
+// other player, and the last one standing wins.
 class TwoPlayerOptionScene : public PlayOptionScene {
 public:
-    BlockEngine::Modes getMode() { return BlockEngine::MARATHON; };
+    BlockEngine::Modes getMode() { return BlockEngine::BATTLE; };
 
     std::list<Element*> getElementList() {
         return {

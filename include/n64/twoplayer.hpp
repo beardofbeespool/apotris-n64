@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 // N64 local two-player split-screen (see docs/n64-two-player.md)
 
 class Scene;
@@ -22,6 +24,19 @@ Scene* n64CreateSplitScene();
 
 // Renders both players' halves of the screen (rdpq attached to it)
 void n64RenderTwoPlayer();
+
+// Runs fn with the other player's state live (e.g. to print on their board)
+void n64AsOtherPlayer(const std::function<void()>& fn);
+
+// Called by the live player's game screen when its game has ended
+void n64TwoPlayerGameOver();
+
+// The shared countdown (player 1's) has finished
+bool n64TwoPlayerCountdownDone();
+void n64TwoPlayerCountdownFinished();
+
+// Restart both games at the end of the current frame (pause menu)
+void n64TwoPlayerRestart();
 
 // Which controller the game's key functions read (liba_n64.cpp)
 void n64SetInputPort(int port);

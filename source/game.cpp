@@ -1893,6 +1893,18 @@ void GameScene::countdown() {
     if (handlingTest)
         timer = timerMax;
 
+#ifdef APOTRIS_N64
+    // Two players share player 1's countdown, which is shown on both boards.
+    // Player 2's waits for it to finish and then ends straight away, so both
+    // games start together.
+    const bool twoPlayerLead = n64TwoPlayerActive() && n64CurrentPlayer() == 0;
+    if (n64TwoPlayerActive() && n64CurrentPlayer() == 1) {
+        if (!n64TwoPlayerCountdownDone())
+            return;
+        timer = timerMax;
+    }
+#endif
+
     push = 0;
     shake = 0;
     shakeVelocity = 0;
@@ -2001,6 +2013,14 @@ void GameScene::countdown() {
 
         Position pos = gameLayout[(int)GameElements::FIELD];
 
+#ifdef APOTRIS_N64
+        if (twoPlayerLead)
+            n64AsOtherPlayer([&] {
+                aprint(timer < 2 * timerMax / 3 ? "READY?" : "  GO  ",
+                       pos.x / 8 + 2, pos.y / 8 + 10);
+            });
+#endif
+
         if (timer < timerMax / 3) {
             aprint("READY?", pos.x / 8 + 2, pos.y / 8 + 10);
             if (timer == 1 && savefile->settings.announcer) {
@@ -2061,6 +2081,11 @@ void GameScene::countdown() {
     game->chargeDas();
 
     counted = true;
+
+#ifdef APOTRIS_N64
+    if (twoPlayerLead)
+        n64TwoPlayerCountdownFinished();
+#endif
 }
 
 void screenShake() {
@@ -4067,7 +4092,12 @@ void GameScene::init() {
 
     showZoneMeter();
 
-    if (game->gameMode == BATTLE) {
+    // the CPU opponent's small board (two players both have full ones)
+    if (game->gameMode == BATTLE
+#ifdef APOTRIS_N64
+        && !n64TwoPlayerActive()
+#endif
+    ) {
         drawEnemyBoard();
     }
 
@@ -4087,6 +4117,12 @@ void GameScene::update() {
         countdown();
         if (MatchmakingQueue::blocksSceneUpdate())
             return;
+
+#ifdef APOTRIS_N64
+        // in two-player the music is player 1's to choose
+        if (n64TwoPlayerActive() && n64CurrentPlayer() == 1)
+            return;
+#endif
 
         if (!(game->gameMode == TRAINING || handlingTest))
             playSongRandom(1);
@@ -4148,7 +4184,11 @@ void GameScene::update() {
         return;
     }
 
-    if (game->gameMode == BATTLE && !multiplayer) {
+    if (game->gameMode == BATTLE && !multiplayer
+#ifdef APOTRIS_N64
+        && !n64TwoPlayerActive()
+#endif
+    ) {
 #ifndef MULTIBOOT
         if (!botGame->clearLock) {
             testBot->run();
@@ -4221,6 +4261,13 @@ void GameScene::update() {
     }
 
     if ((game->won || game->lost) && !(flashTimer || eventPauseTimer)) {
+#ifdef APOTRIS_N64
+        // two players: the split screen shows the result on both boards
+        if (n64TwoPlayerActive()) {
+            n64TwoPlayerGameOver();
+            return;
+        }
+#endif
         if (replaying)
             injectReplayEndStats();
         paused = true;

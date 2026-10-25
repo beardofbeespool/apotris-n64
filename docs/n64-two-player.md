@@ -72,8 +72,8 @@ Swap: `attackAnimationTimers`, `botClearTimer`, `botIncomingHeight`. Shared:
 
 - text.cpp: `allocatedTiles`, `textArea` (text tiles are allocated in the
   world's VRAM): swap.
-- main.cpp: `shake`, `gameSeconds`, `gradientTable`, `gradientEnabled`: swap;
-  `paused`: shared (pausing pauses both); `savefile`, `frameCounter`,
+- main.cpp: `shake`, `gameSeconds`, `gradientTable`, `gradientEnabled`,
+  `paused`: swap; `savefile`, `frameCounter`,
   `canDraw`, `multiplayer`, `playingBotGame`, `nextSeed`: shared.
 - The scene: `GameScene` keeps per-game state in members (`counted`, timers...).
   Each player gets their own scene object, and the global `scene` is swapped.
@@ -87,8 +87,8 @@ Swap: `attackAnimationTimers`, `botClearTimer`, `botIncomingHeight`. Shared:
 - Each file's per-player globals are listed with `N64_PLAYER_STATE()`
   (`include/n64/player_state.hpp`): game.cpp, multiplayer.cpp, text.cpp,
   main.cpp. The live set and a stash are swapped when the player changes;
-  plain arrays are swapped with memcpy. `paused` is shared: the pause menu
-  runs inside one player's turn, so pausing pauses both.
+  plain arrays are swapped with memcpy. `paused` is swapped too (phase 3): the
+  pause menu runs inside the pausing player's turn, which blocks both games.
 - `source/n64/twoplayer.cpp`: `n64SwitchPlayer()` swaps that state, selects the
   player's world and controller. `SplitScene` runs a `GameScene` per player.
   Player 2's world starts as a copy of player 1's (font, palettes) and gets its
@@ -99,9 +99,9 @@ Swap: `attackAnimationTimers`, `botClearTimer`, `botIncomingHeight`. Shared:
   restored after each call.
 - Rendering only needs each player's world, which keeps a snapshot of the
   player's backdrop gradient, so it switches worlds without swapping state.
-- Each half shows GBA columns 42-202 of that player's screen; tiles and sprites
-  outside are skipped. The hold box and queue frames lose about 3 pixels at the
-  outer edges. All 5 queue pieces fit.
+- At first each half showed GBA columns 42-202 of that player's screen, which
+  cut the hold box and queue at the TV's edges; phase 3 replaced this with the
+  region layout. All 5 queue pieces fit.
 - Controllers 1 and 2 are read in one Joybus transaction. Player 2 uses player
   1's button mapping for now.
 - "2P Battle" in the Play menu (N64 only) starts it. For now both players play
@@ -117,14 +117,37 @@ fps with an occasional missed frame, input on screen after about 17 ms.
 Rendering is about 4.5 ms per player, of which sprites are 2.9 ms. Single
 player is unchanged.
 
-Known gaps, for the next phases: when one player's game ends, its end screen
-runs while the other player is frozen; no battle rules yet.
 
-## Next phases
+## Phase 3 (done): battle, layout, speed
 
-3. Versus: garbage exchange through the existing battle code, win and loss,
-   a "2P Battle" entry in the Play menu, results.
-4. Layout and speed: score, attack and timer above and below the boards, and
-   the frame edges. Speed first: sprites cost 2.9 ms per player, and caching
-   their converted textures between frames (the sprite tiles have dirty
-   flags) should bring two-player back to a comfortable margin.
+- Both games start with the same seed, so they get the same pieces. After each
+  frame, `SplitScene` moves each game's outgoing attack into the other's
+  garbage queue (`exchangeGarbage()`), and when one game is lost the other is
+  won.
+- One countdown: player 1's countdown runs and prints READY?/GO on both boards;
+  player 2's game waits for it and starts on GO, without restarting the music.
+- End of a round: instead of the single-player end screen (and its leaderboard
+  and name entry), each board shows WIN, LOSE or DRAW and the session's win
+  tally. A or Start plays again, B quits to the menu. Battle keeps no scores.
+- Pause: the pause menu opens on the board of the player who pressed Start,
+  driven by their controller; only that player is drawn while it runs.
+  Restart restarts both games (`n64TwoPlayerRestart()`).
+- Layout: the screen is built from pieces of each player's GBA screen
+  (`PpuRegion`): board, hold box, queue, timer and attack bar. They are placed
+  inside the CRT safe area, player 2's mirrored, so nothing is lost at the
+  edges of the TV.
+- Speed: `ppuRenderRegions()` draws all of a world's regions in one pass, layer
+  by layer, so the palette (TLUT) is loaded only when it changes; rotated and
+  scaled sprites are cached between frames, keyed by their tiles' version
+  counters. Steady 60 fps in ares: about 12 ms of work per frame, input on
+  screen after about 17 ms.
+
+Checked in ares: same pieces for both, garbage both ways, WIN/LOSE and the
+tally, Retry and Quit, either player pausing, and single player pixel for pixel
+as before (compare build).
+
+## Next
+
+- Player 2's own button mapping.
+- Pause and result text are wider than the board and spill into the side
+  columns.

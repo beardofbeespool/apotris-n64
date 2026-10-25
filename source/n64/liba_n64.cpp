@@ -22,7 +22,7 @@
 // The picture is drawn by the RDP (ppuRenderFrameRdp). Build with
 // -DAPOTRIS_N64_CPU_PPU to draw it on the CPU instead, to compare the two.
 extern void ppuRenderFrame(void* dst, int strideBytes);
-extern void ppuRenderFrameRdp(int originX, int originY, int viewX0, int viewX1);
+extern void ppuRenderFrameRdp(int originX, int originY);
 
 void audioInit();
 void audioUpdate();
@@ -407,7 +407,7 @@ void vsync() {
         n64RenderTwoPlayer();
     } else {
         ppuSnapshotGradient();
-        ppuRenderFrameRdp(ORIGIN_X, ORIGIN_Y, 0, SCREEN_WIDTH);
+        ppuRenderFrameRdp(ORIGIN_X, ORIGIN_Y);
     }
     rdpq_detach_show();
 #endif

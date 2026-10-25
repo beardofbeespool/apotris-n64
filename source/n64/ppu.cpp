@@ -214,8 +214,8 @@ void setLayerScroll(int layer, int x, int y) {
 
 void loadSpriteTiles(int index, const void* src, int lengthX, int lengthY) {
     memcpy32_fast(&tng::world->sprite_tile_images[index], src, lengthX * lengthY * 8);
-    for (int i = 0; i < lengthX + lengthY; i++) {
-        tng::world->sprite_tile_dirty_flag[index + i] = true;
+    for (int i = 0; i < lengthX * lengthY; i++) {
+        tng::world->sprite_tile_version[(index + i) & (tng::SPRITE_TILE_COUNT - 1)]++;
     }
 
 }
@@ -224,23 +224,25 @@ void loadSpriteTilesPartial(int index, const void* src, int tx, int ty,
                             int lengthX, int lengthY, int rowLength) {
     memcpy32_fast(&tng::world->sprite_tile_images[index + ty * rowLength + tx], src,
                   lengthX * lengthY * 8);
-    for (int i = 0; i < lengthX + lengthY; i++) {
-        tng::world->sprite_tile_dirty_flag[index + ty * rowLength + tx + i] = true;
+    for (int i = 0; i < lengthX * lengthY; i++) {
+        tng::world->sprite_tile_version[(index + ty * rowLength + tx + i) &
+                                        (tng::SPRITE_TILE_COUNT - 1)]++;
     }
 
 }
 
 void clearSpriteTiles(int index, int lengthX, int lengthY) {
     memset32_fast(&tng::world->sprite_tile_images[index], 0, lengthX * lengthY * 8);
-    for (int i = 0; i < lengthX + lengthY; i++) {
-        tng::world->sprite_tile_dirty_flag[index + i] = true;
+    for (int i = 0; i < lengthX * lengthY; i++) {
+        tng::world->sprite_tile_version[(index + i) & (tng::SPRITE_TILE_COUNT - 1)]++;
     }
 
 }
 
 void clearSpriteTile(int index, int tx, int ty, int width) {
     memset32_fast(&tng::world->sprite_tile_images[index + ty * width + tx], 0, 8);
-    tng::world->sprite_tile_dirty_flag[index + ty * width + tx] = true;
+    tng::world->sprite_tile_version[(index + ty * width + tx) &
+                                    (tng::SPRITE_TILE_COUNT - 1)]++;
 
 }
 
@@ -843,9 +845,23 @@ constexpr rdpq_tile_t TILE_LOAD = TILE6;
 alignas(16) u16 tlutBg[256];
 alignas(16) u16 tlutSprite[256];
 
-// Linear copies of affine sprites, one per sprite as the RDP reads them later
+// Affine sprites converted to linear CI4, kept between frames: the next
+// queue's pieces, for one, stay the same for many frames. An entry is reused
+// while none of its tiles has been written (sprite_tile_version), and is only
+// replaced in a later frame, after the RDP has read it.
 constexpr int AFFINE_MAX_BYTES = 64 * 64 / 2;
-alignas(16) u8 affineBuffers[tng::SPRITE_OBJ_COUNT][AFFINE_MAX_BYTES];
+constexpr int AFFINE_CACHE_SIZE = 24;
+
+struct AffineImage {
+    const tng::World* world = nullptr;
+    int tileStart = -1, w = 0, h = 0;
+    u32 version = 0;
+    u32 lastUsed = 0;
+    alignas(16) u8 pixels[AFFINE_MAX_BYTES];
+};
+
+AffineImage affineCache[AFFINE_CACHE_SIZE];
+u32 affineFrame = 1;
 
 struct Region {
     int x0, y0, x1, y1;
@@ -864,6 +880,21 @@ void resetRdpState() {
     imageBase = nullptr;
     lastLoaded = nullptr;
     drawPalette = -1;
+}
+
+// The background and sprite palettes take turns in TMEM. The one needed is
+// only uploaded right before something is drawn with it, so a region that
+// shows nothing of a layer costs no upload.
+const u16* wantedTlut;
+const u16* loadedTlut;
+
+void ensureTlut() {
+    if (loadedTlut != wantedTlut) {
+        rdpq_tex_upload_tlut((u16*)wantedTlut, 0, 256);
+        loadedTlut = wantedTlut;
+        // the upload points the texture image at the palette
+        imageBase = nullptr;
+    }
 }
 
 inline bool tileEmpty(const tng::ImageTile& t) {
@@ -953,6 +984,7 @@ template <typename F> void forEachWindowRect(const tng::ClipWindow& w, F draw) {
 // rectangle repeats the tile across the whole block.
 void drawTileBlock(const tng::ImageTile* tile, int palette, bool flipx,
                    bool flipy, int x, int y, int w, int h) {
+    ensureTlut();
     if (tile != lastLoaded) {
         // Tiles are loaded as an image 4 bytes (8 texels) wide with one tile
         // per 8 rows, so one image covers about 128 tiles (load coordinates
@@ -1015,8 +1047,11 @@ void drawBgLayer(int layer) {
     const int firstCol = std::max(0, (view.x0 + (sx & 7)) / 8);
     const int lastCol = std::min(31, (view.x1 + (sx & 7) + 7) / 8);
 
+    const int firstRow = std::max(0, (view.y0 + (sy & 7)) / 8);
+    const int lastRow = std::min(21, (view.y1 + (sy & 7) + 7) / 8);
+
     int count = 0;
-    for (int row = 0; row < 21; row++) {
+    for (int row = firstRow; row < lastRow; row++) {
         const int ty = ((sy >> 3) + row) & 31;
         const u16* line = &map[ty * 32];
         int col = firstCol;
@@ -1065,6 +1100,7 @@ constexpr rdpq_tile_t TILE_SPRITE = TILE1;
 constexpr int SPRITE_TILES_PER_LOAD = 32;
 
 void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
+    ensureTlut();
     const int rowsPerLoad = std::max(1, SPRITE_TILES_PER_LOAD / wt);
 
     for (int srcY0 = 0; srcY0 < ht; srcY0 += rowsPerLoad) {
@@ -1075,7 +1111,7 @@ void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
         for (int srcY = srcY0; srcY < srcY1 && !any; srcY++) {
             const int cy = s->flipy ? ht - 1 - srcY : srcY;
             const int y = s->y + cy * 8;
-            if (y >= PPU_H || y + 8 <= 0)
+            if (y >= view.y1 || y + 8 <= view.y0)
                 continue;
             for (int srcX = 0; srcX < wt; srcX++) {
                 const int index = first + srcY * wt + srcX;
@@ -1109,7 +1145,7 @@ void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
         for (int srcY = srcY0; srcY < srcY1; srcY++) {
             const int cy = s->flipy ? ht - 1 - srcY : srcY;
             const int y = s->y + cy * 8;
-            if (y >= PPU_H || y + 8 <= 0)
+            if (y >= view.y1 || y + 8 <= view.y0)
                 continue;
             for (int srcX = 0; srcX < wt; srcX++) {
                 const int index = first + srcY * wt + srcX;
@@ -1136,13 +1172,69 @@ void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
     }
 }
 
+const u8* affineImage(const OBJ_ATTR* s, int w, int h, int pitch) {
+    const int wt = w >> 3, ht = h >> 3;
+    const int first = s->tile_start & (tng::SPRITE_TILE_COUNT - 1);
+
+    u32 version = 0;
+    for (int i = 0; i < wt * ht; i++)
+        version += tng::world->sprite_tile_version[(first + i) &
+                                                   (tng::SPRITE_TILE_COUNT - 1)];
+
+    AffineImage* slot = nullptr;
+    for (AffineImage& entry : affineCache) {
+        if (entry.world == tng::world && entry.tileStart == first &&
+            entry.w == w && entry.h == h) {
+            slot = &entry;
+            break;
+        }
+    }
+    if (slot && slot->version == version) {
+        slot->lastUsed = affineFrame;
+        return slot->pixels;
+    }
+
+    if (slot == nullptr) {
+        // the least recently used entry not needed this frame
+        for (AffineImage& entry : affineCache) {
+            if (entry.lastUsed != affineFrame &&
+                (slot == nullptr || entry.lastUsed < slot->lastUsed))
+                slot = &entry;
+        }
+        if (slot == nullptr)
+            return nullptr;
+    }
+
+    for (int y = 0; y < h; y++) {
+        for (int cx = 0; cx < wt; cx++) {
+            const tng::ImageTile& t =
+                tng::world->sprite_tile_images[(first + (y >> 3) * wt + cx) &
+                                               (tng::SPRITE_TILE_COUNT - 1)];
+            // GBA rows keep the left pixel in the lowest nibble, CI4 wants it
+            // in the highest: reverse the order of the 8 nibbles
+            u32 row = t.rows[y & 7];
+            row = ((row >> 4) & 0x0f0f0f0f) | ((row & 0x0f0f0f0f) << 4);
+            *(u32*)(slot->pixels + y * pitch + cx * 4) = __builtin_bswap32(row);
+        }
+    }
+    data_cache_hit_writeback(slot->pixels, pitch * h);
+
+    slot->world = tng::world;
+    slot->tileStart = first;
+    slot->w = w;
+    slot->h = h;
+    slot->version = version;
+    slot->lastUsed = affineFrame;
+    return slot->pixels;
+}
+
 void drawSprite(const OBJ_ATTR* s) {
     const int w = s->sx, h = s->sy;
     const int wt = w >> 3, ht = h >> 3;
 
     if (!s->affine) {
-        if (s->x >= view.x1 || s->x + w <= view.x0 || s->y >= PPU_H ||
-            s->y + h <= 0)
+        if (s->x >= view.x1 || s->x + w <= view.x0 || s->y >= view.y1 ||
+            s->y + h <= view.y0)
             return;
         const int first = s->tile_start & (tng::SPRITE_TILE_COUNT - 1);
         if (first + wt * ht <= (int)tng::SPRITE_TILE_COUNT) {
@@ -1168,8 +1260,8 @@ void drawSprite(const OBJ_ATTR* s) {
 
     const int rw = s->doubleSize ? w * 2 : w;
     const int rh = s->doubleSize ? h * 2 : h;
-    if (s->x >= view.x1 || s->x + rw <= view.x0 || s->y >= PPU_H ||
-        s->y + rh <= 0)
+    if (s->x >= view.x1 || s->x + rw <= view.x0 || s->y >= view.y1 ||
+        s->y + rh <= view.y0)
         return;
     if (w > 64 || h > 64)
         return;
@@ -1204,23 +1296,14 @@ void drawSprite(const OBJ_ATTR* s) {
     if (box.x0 >= box.x1 || box.y0 >= box.y1)
         return;
 
-    // Copy the sprite into a linear CI4 image. TMEM lines are 8 bytes, so
-    // narrow sprites are padded.
+    ensureTlut();
+
+    // The sprite as a linear CI4 image. TMEM lines are 8 bytes, so narrow
+    // sprites are padded.
     const int pitch = std::max(w / 2, 8);
-    u8* image = affineBuffers[s - obj_buffer];
-    for (int y = 0; y < h; y++) {
-        for (int cx = 0; cx < wt; cx++) {
-            const tng::ImageTile& t =
-                tng::world->sprite_tile_images[(s->tile_start + (y >> 3) * wt + cx) &
-                                        (tng::SPRITE_TILE_COUNT - 1)];
-            // GBA rows keep the left pixel in the lowest nibble, CI4 wants it
-            // in the highest: reverse the order of the 8 nibbles
-            u32 row = t.rows[y & 7];
-            row = ((row >> 4) & 0x0f0f0f0f) | ((row & 0x0f0f0f0f) << 4);
-            *(u32*)(image + y * pitch + cx * 4) = __builtin_bswap32(row);
-        }
-    }
-    data_cache_hit_writeback(image, pitch * h);
+    const u8* image = affineImage(s, w, h, pitch);
+    if (image == nullptr)
+        return;
 
     rdpq_set_texture_image_raw(0, PhysicalAddr(image), FMT_CI8, pitch, h);
     rdpq_set_tile(TILE_LOAD, FMT_CI8, 0, pitch, NULL);
@@ -1315,12 +1398,12 @@ void drawSprites(int priority) {
 // fill a TMEM line, stretched across the screen by a single rectangle.
 alignas(16) u16 gradientTexture[PPU_H][4];
 
-void ppuRenderFrameRdp(int ox, int oy, int viewX0, int viewX1) {
-    originX = ox;
-    originY = oy;
-    view = {viewX0, 0, viewX1, PPU_H};
-    resetRdpState();
-    scissor = {-1, -1, -1, -1};
+// Once per world per frame: everything its region passes share
+void ppuPrepareWorld() {
+    // once per frame (worlds are rendered in order): an image used earlier
+    // in this frame must not be replaced before the RDP has drawn it
+    if (tng::world == &tng::worlds[0])
+        affineFrame++;
     memset(bgTileState, 0, sizeof(bgTileState));
     memset(spriteTileState, 0, sizeof(spriteTileState));
 
@@ -1340,46 +1423,83 @@ void ppuRenderFrameRdp(int ox, int oy, int viewX0, int viewX1) {
     // quicker than walking the 96 KB of tile memory line by line.
     data_cache_writeback_invalidate_all();
 
-    setScissor({0, 0, PPU_W, PPU_H});
+    // the palettes were rebuilt for this world
+    loadedTlut = nullptr;
+}
+
+// Make one region current: what drawing is clipped to and where it lands
+void selectRegion(const PpuRegion& r) {
+    originX = r.dx - r.x0;
+    originY = r.dy - r.y0;
+    view = {r.x0, r.y0, r.x1, r.y1};
+    // the scissor cache holds GBA coordinates, which mean something else now
+    scissor = {-1, -1, -1, -1};
+}
+
+// Draws rectangles of the current world's GBA screen, each at its own place
+// on the framebuffer, in one pass: each layer and sprite priority is drawn
+// into every region before moving on, so the palettes (background and
+// sprites take turns in TMEM) are swapped as often as for one region.
+// Tiles and sprites outside a region are skipped. Call ppuPrepareWorld()
+// first.
+void ppuRenderRegions(const PpuRegion* regions, int count) {
+    resetRdpState();
+
     if (tng::world->gradientEnabled) {
         rdpq_set_mode_standard();
         surface_t gradient =
             surface_make_linear(gradientTexture, FMT_RGBA16, 4, PPU_H);
         rdpq_tex_upload(TILE_DRAW, &gradient, NULL);
-        rdpq_texture_rectangle_scaled(TILE_DRAW, ox, oy, ox + PPU_W, oy + PPU_H,
-                                      0, 0, 0, PPU_H);
+        for (int i = 0; i < count; i++) {
+            selectRegion(regions[i]);
+            setScissor({0, 0, PPU_W, PPU_H});
+            rdpq_texture_rectangle_scaled(TILE_DRAW, originX, originY,
+                                          originX + PPU_W, originY + PPU_H,
+                                          0, 0, 0, PPU_H);
+        }
     } else {
-        rdpq_set_mode_fill(color_from_packed16(tng::world->palettes[tng::PALETTE_BG][0][0]));
-        rdpq_fill_rectangle(ox, oy, ox + PPU_W, oy + PPU_H);
+        rdpq_set_mode_fill(
+            color_from_packed16(tng::world->palettes[tng::PALETTE_BG][0][0]));
+        for (int i = 0; i < count; i++) {
+            selectRegion(regions[i]);
+            setScissor({0, 0, PPU_W, PPU_H});
+            rdpq_fill_rectangle(originX, originY, originX + PPU_W,
+                                originY + PPU_H);
+        }
         rdpq_set_mode_standard();
     }
+    // the gradient was loaded where the tiles go
+    resetRdpState();
 
     rdpq_mode_tlut(TLUT_RGBA16);
     rdpq_mode_alphacompare(1);
     rdpq_set_tile(TILE_LOAD, FMT_CI8, 0, 8, NULL);
     rdpq_set_tile_size(TILE_DRAW, 0, 0, 8, 8);
 
-    const u16* tlut = nullptr;
-    auto useTlut = [&](const u16* t) {
-        if (tlut != t) {
-            rdpq_tex_upload_tlut((u16*)t, 0, 256);
-            tlut = t;
-            // the upload points the texture image at the palette
-            imageBase = nullptr;
-        }
-    };
-
     for (int p = 3; p >= 0; p--) {
         for (int l = 3; l >= 0; l--) {
             const tng::LayerInfo& li = tng::world->layers[l];
             if (li.enabled && li.priority >= 0 && ((li.priority >> 4) & 3) == p) {
-                useTlut(tlutBg);
-                drawBgLayer(l);
+                wantedTlut = tlutBg;
+                for (int i = 0; i < count; i++) {
+                    selectRegion(regions[i]);
+                    drawBgLayer(l);
+                }
             }
         }
         if (spriteCount[p] > 0) {
-            useTlut(tlutSprite);
-            drawSprites(p);
+            wantedTlut = tlutSprite;
+            for (int i = 0; i < count; i++) {
+                selectRegion(regions[i]);
+                drawSprites(p);
+            }
         }
     }
+}
+
+// The whole GBA screen with its top-left corner at (ox, oy)
+void ppuRenderFrameRdp(int ox, int oy) {
+    ppuPrepareWorld();
+    const PpuRegion all = {0, 0, PPU_W, PPU_H, ox, oy};
+    ppuRenderRegions(&all, 1);
 }

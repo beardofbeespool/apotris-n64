@@ -1,4 +1,7 @@
 #include "def.h"
+#ifdef APOTRIS_N64
+#include "n64/twoplayer.hpp"
+#endif
 #include "platform.hpp"
 #include "rumble.h"
 #include "rumblePatterns.hpp"
@@ -782,6 +785,17 @@ int GameScene::pauseMenu() {
 
     auto restartGame = [&]() {
         addGameStats();
+#ifdef APOTRIS_N64
+        // two players: restart both games, from the top of the frame (this
+        // runs inside one player's turn)
+        if (n64TwoPlayerActive()) {
+            n64TwoPlayerRestart();
+            paused = false;
+            count = false;
+            sfx(SFX_MENUCONFIRM);
+            return;
+        }
+#endif
         startGame();
         changeScene([]() { return new GameScene(); });
         paused = false;

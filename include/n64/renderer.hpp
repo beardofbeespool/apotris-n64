@@ -79,7 +79,9 @@ struct World {
     alignas(16) u8 bg_storage[BG_TILEMAP_STORAGE_SIZE];
     alignas(16) ImageTile sprite_tile_images[SPRITE_TILE_COUNT];
 
-    bool sprite_tile_dirty_flag[SPRITE_TILE_COUNT];
+    // bumped on every write to a sprite tile, so converted copies of
+    // sprites can tell when they are out of date
+    u32 sprite_tile_version[SPRITE_TILE_COUNT];
     bool sprite_obj_dirty_flag[SPRITE_OBJ_COUNT];
     bool bg_screenblock_fill_screen[BG_SCREENBLOCK_TILEMAP_COUNT];
 
@@ -134,3 +136,15 @@ int ppuCurrentWorld();
 // Copies the game's backdrop gradient into the current world, so the world
 // can be rendered later without the rest of its player's state
 void ppuSnapshotGradient();
+
+// A rectangle of a world's GBA screen and where it goes on the framebuffer
+struct PpuRegion {
+    int x0, y0, x1, y1;     // on the GBA screen
+    int dx, dy;             // top-left on the framebuffer
+};
+
+// Per world, once per frame, before rendering any of it
+void ppuPrepareWorld();
+
+// Renders regions of the current world in one pass (rdpq attached)
+void ppuRenderRegions(const PpuRegion* regions, int count);
