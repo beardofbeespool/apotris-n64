@@ -180,6 +180,11 @@ as before (compare build).
   (`n64PauseMenuOpen`). Player 2's backdrop is set up when the countdown
   starts, instead of staying black until GO.
 
+Later fixes: the win tally is per session (reset when a new split screen
+starts from the menus, kept across retries and restarts); a paused player's
+board is clipped at its frame, and the pause menu's song name is left out in
+two-player (both are placed for the whole GBA screen).
+
 ## Next
 
 - Player 2's own button mapping.

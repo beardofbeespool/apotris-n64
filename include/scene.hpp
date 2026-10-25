@@ -257,7 +257,8 @@ public:
     std::list<std::string> getOptionList() {
         std::list<std::string> result = menuOptions;
 
-#if !(defined(GBA) || defined(WEB))
+// (a console has nothing to quit to)
+#if !(defined(GBA) || defined(WEB) || defined(APOTRIS_N64))
 
         result.push_back("Quit");
 

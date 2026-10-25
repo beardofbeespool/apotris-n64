@@ -756,6 +756,12 @@ int GameScene::pauseMenu() {
     int pendingSong = -1;
 
     auto showNowPlaying = [](int songIndex) {
+#ifdef APOTRIS_N64
+        // placed for the whole GBA screen: the split screen shows none of it
+        // but the start of a long name, on the board's frame
+        if (n64TwoPlayerActive())
+            return;
+#endif
         std::string trackName = getDisplayTrackName(songIndex);
         if (trackName.empty())
             return;
@@ -815,6 +821,11 @@ int GameScene::pauseMenu() {
         sfx(SFX_MENUCANCEL);
         buildBG(3, 0, 27, 0, 1, true);
         addGameStats();
+#ifdef APOTRIS_N64
+        // as at the end of a game (see endScreenSetup())
+        saveSavefile();
+        framesSinceLastSave = 0;
+#endif
         playSongRandom(0);
 
 #ifdef MULTIBOOT
@@ -1901,6 +1912,15 @@ int GameScene::endScreenSetup() {
     } else {
         record = onRecord();
     }
+
+#ifdef APOTRIS_N64
+    // A console is often just switched off: save the game's stats now
+    // rather than at the next autosave (a record has already been saved)
+    if (record < 0 && !replaying) {
+        saveSavefile();
+        framesSinceLastSave = 0;
+    }
+#endif
 
 #ifdef GBA
     if (multiplayer &&

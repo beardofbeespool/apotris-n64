@@ -42,13 +42,17 @@ struct Piece {
 };
 
 constexpr Piece PIECES[] = {
-    {72, 0, 169, 160, 59, 40},      // board, its frame and the garbage meter
-    // (from x 72: column 71 is the timer box's last)
+    {72, 0, 168, 160, 59, 40},      // board, its frame and the meters
+    // (x 72-167: column 71 is the timer box's last, and text placed for the
+    // whole GBA screen, the pause menu's song name for one, starts at 168)
     {38, 69, 72, 103, 19, 32},      // hold box
     {171, 8, 207, 152, 18, 70},     // next queue
     {0, 8, 72, 16, 84, 28},         // timer
     {0, 136, 72, 152, 84, 204},     // attack counter
 };
+
+// the board's frame ends here on the GBA screen (the field is at x 80)
+constexpr int BOARD_FRAME_RIGHT = 80 + 10 * 8 + 4;
 
 constexpr int SCREEN_W = 320;
 
@@ -96,8 +100,11 @@ template <typename F> void forBothPlayers(F fn) {
     }
 }
 
-// Wins so far in this session, shown on the result screen
+// Wins so far in this session, shown on the result screen. A session runs
+// from the menu to the next quit (from the result screen or the pause menu);
+// retries keep counting.
 int wins[2] = {};
+bool keepWins = false;
 
 // Set by a player's game screen when its game has ended
 bool gameOverReported = false;
@@ -113,6 +120,10 @@ public:
     bool over = false;
 
     void init() override {
+        if (!keepWins)
+            wins[0] = wins[1] = 0;
+        keepWins = false;
+
         active = true;
         livePlayer = 0;
         gameOverReported = false;
@@ -177,6 +188,7 @@ public:
     // A new game for both players (the result screen's retry, or restart in
     // the pause menu); whatever comes next carries on with player 1's state
     void restart() {
+        keepWins = true;
         n64SwitchPlayer(0);
         startGame();
         gameLoop();
@@ -246,7 +258,6 @@ public:
         } else {
             sfx(SFX_MENUCANCEL);
             n64SwitchPlayer(0);
-            wins[0] = wins[1] = 0;
             changeScene([]() { return new MainMenuScene(); }, Transitions::FADE);
         }
     }
@@ -358,7 +369,13 @@ void n64RenderTwoPlayer() {
         // other lines (song name, hints) are placed for the full GBA screen
         // and would land in the hold, queue and timer boxes
         const bool pausing = depth > 0 && n64PauseMenuOpen && p == livePlayer;
-        ppuRenderRegions(regions, pausing ? 1 : n, false);
+        if (pausing) {
+            // and only up to the frame's outer edge: the song name starts
+            // in the meter column on its right
+            regions[0].x1 = BOARD_FRAME_RIGHT;
+            n = 1;
+        }
+        ppuRenderRegions(regions, n, false);
         ppuRenderBoardCaps(board.dx - board.x0, board.dy - board.y0, SCREEN_W,
                            SCREEN_H);
     }
