@@ -135,7 +135,9 @@ player is unchanged.
 - Layout: the screen is built from pieces of each player's GBA screen
   (`PpuRegion`): board, hold box, queue, timer and attack bar. They are placed
   inside the CRT safe area, player 2's mirrored, so nothing is lost at the
-  edges of the TV.
+  edges of the TV. Pieces must not overlap on the GBA screen: the board
+  starts at x 72 because column 71 is the timer box's last, which showed as a
+  thin bar beside the board.
 - Backdrop: each half is filled with its player's gradient in one piece
   (`ppuRenderBackdrop()`), lined up with the board and carried on above and
   below it, and the pieces are drawn on top without a backdrop of their own.
@@ -157,4 +159,3 @@ as before (compare build).
 ## Next
 
 - Player 2's own button mapping.
-- A thin bar sometimes shows between the hold box and the board.

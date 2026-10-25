@@ -40,7 +40,8 @@ struct Piece {
 };
 
 constexpr Piece PIECES[] = {
-    {71, 0, 169, 160, 58, 40},      // board, its frame and the garbage meter
+    {72, 0, 169, 160, 59, 40},      // board, its frame and the garbage meter
+    // (from x 72: column 71 is the timer box's last)
     {38, 69, 72, 103, 19, 32},      // hold box
     {171, 8, 207, 152, 18, 70},     // next queue
     {0, 8, 72, 16, 84, 28},         // timer
