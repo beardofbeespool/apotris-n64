@@ -48,6 +48,10 @@ std::string getDescription(const std::string& element) {
 #endif
     } else if (element == "CPU Battle") {
         return "Go against an AI opponent.";
+#ifdef APOTRIS_N64
+    } else if (element == "2P Battle") {
+        return "Two players, split screen. Plug in a second controller.";
+#endif
 
     } else if (element == "Training") {
         return "Try out new strategies or improve your playing.";

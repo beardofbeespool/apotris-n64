@@ -85,6 +85,19 @@ void ppuSelectWorld(int index) {
 
 int ppuCurrentWorld() { return currentWorld; }
 
+void ppuSnapshotGradient() {
+    memcpy(tng::world->gradient, gradientTable, sizeof(tng::world->gradient));
+    tng::world->gradientEnabled = gradientEnabled;
+}
+
+void ppuCopyWorld(int from, int to) {
+    SpriteAttributes* oam = tng::worlds[to].oam;
+    tng::worlds[to] = tng::worlds[from];
+    tng::worlds[to].oam = oam;
+    for (size_t i = 0; i < tng::SPRITE_OBJ_COUNT; i++)
+        oamStorage[to][i] = oamStorage[from][i];
+}
+
 // Clip windows used by the renderer (screen coordinates, GBA 240x160 space)
 namespace cr {
 
@@ -882,7 +895,15 @@ void buildTlut(u16* dst, const std::array<std::array<u16, 16>, 16>& pals) {
 
 Region scissor;
 
+// The part of the GBA screen being rendered (all of it, except in
+// two-player mode, where each player's half shows a slice)
+Region view = {0, 0, PPU_W, PPU_H};
+
 void setScissor(Region r) {
+    r.x0 = std::max(r.x0, view.x0);
+    r.y0 = std::max(r.y0, view.y0);
+    r.x1 = std::max(std::min(r.x1, view.x1), r.x0);
+    r.y1 = std::max(std::min(r.y1, view.y1), r.y0);
     if (r.x0 == scissor.x0 && r.y0 == scissor.y0 && r.x1 == scissor.x1 &&
         r.y1 == scissor.y1)
         return;
@@ -990,15 +1011,20 @@ void drawBgLayer(int layer) {
     // by tile and palette, each tile is loaded once and the palette is set
     // once per run, and equal runs on consecutive rows end up next to each
     // other, ready to be merged into taller blocks.
+    // only the columns inside the view (two-player shows a slice)
+    const int firstCol = std::max(0, (view.x0 + (sx & 7)) / 8);
+    const int lastCol = std::min(31, (view.x1 + (sx & 7) + 7) / 8);
+
     int count = 0;
     for (int row = 0; row < 21; row++) {
         const int ty = ((sy >> 3) + row) & 31;
         const u16* line = &map[ty * 32];
-        int col = 0;
-        while (col < 31) {
+        int col = firstCol;
+        while (col < lastCol) {
             const u16 e = line[((sx >> 3) + col) & 31];
             int len = 1;
-            while (col + len < 31 && line[((sx >> 3) + col + len) & 31] == e)
+            while (col + len < lastCol &&
+                   line[((sx >> 3) + col + len) & 31] == e)
                 len++;
             if (!tileEmptyCached(tileState[e & 0x3ff], tiles[e & 0x3ff])) {
                 // map entry (tile, flips, palette) 16 bits | column 5 |
@@ -1091,7 +1117,7 @@ void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
                     continue;
                 const int cx = s->flipx ? wt - 1 - srcX : srcX;
                 const int x = s->x + cx * 8;
-                if (x >= PPU_W || x + 8 <= 0)
+                if (x >= view.x1 || x + 8 <= view.x0)
                     continue;
                 if (tileEmptyCached(spriteTileState[index],
                                     tng::world->sprite_tile_images[index]))
@@ -1115,7 +1141,8 @@ void drawSprite(const OBJ_ATTR* s) {
     const int wt = w >> 3, ht = h >> 3;
 
     if (!s->affine) {
-        if (s->x >= PPU_W || s->x + w <= 0 || s->y >= PPU_H || s->y + h <= 0)
+        if (s->x >= view.x1 || s->x + w <= view.x0 || s->y >= PPU_H ||
+            s->y + h <= 0)
             return;
         const int first = s->tile_start & (tng::SPRITE_TILE_COUNT - 1);
         if (first + wt * ht <= (int)tng::SPRITE_TILE_COUNT) {
@@ -1141,7 +1168,8 @@ void drawSprite(const OBJ_ATTR* s) {
 
     const int rw = s->doubleSize ? w * 2 : w;
     const int rh = s->doubleSize ? h * 2 : h;
-    if (s->x >= PPU_W || s->x + rw <= 0 || s->y >= PPU_H || s->y + rh <= 0)
+    if (s->x >= view.x1 || s->x + rw <= view.x0 || s->y >= PPU_H ||
+        s->y + rh <= 0)
         return;
     if (w > 64 || h > 64)
         return;
@@ -1287,9 +1315,10 @@ void drawSprites(int priority) {
 // fill a TMEM line, stretched across the screen by a single rectangle.
 alignas(16) u16 gradientTexture[PPU_H][4];
 
-void ppuRenderFrameRdp(int ox, int oy) {
+void ppuRenderFrameRdp(int ox, int oy, int viewX0, int viewX1) {
     originX = ox;
     originY = oy;
+    view = {viewX0, 0, viewX1, PPU_H};
     resetRdpState();
     scissor = {-1, -1, -1, -1};
     memset(bgTileState, 0, sizeof(bgTileState));
@@ -1298,9 +1327,9 @@ void ppuRenderFrameRdp(int ox, int oy) {
     buildSpriteLists();
     buildTlut(tlutBg, tng::world->palettes[tng::PALETTE_BG]);
     buildTlut(tlutSprite, tng::world->palettes[tng::PALETTE_SPRITE]);
-    if (gradientEnabled) {
+    if (tng::world->gradientEnabled) {
         for (int y = 0; y < PPU_H; y++) {
-            const u16 c = tng::color_gba_to_tng(gradientTable[y]);
+            const u16 c = tng::color_gba_to_tng(tng::world->gradient[y]);
             gradientTexture[y][0] = gradientTexture[y][1] = c;
             gradientTexture[y][2] = gradientTexture[y][3] = c;
         }
@@ -1312,7 +1341,7 @@ void ppuRenderFrameRdp(int ox, int oy) {
     data_cache_writeback_invalidate_all();
 
     setScissor({0, 0, PPU_W, PPU_H});
-    if (gradientEnabled) {
+    if (tng::world->gradientEnabled) {
         rdpq_set_mode_standard();
         surface_t gradient =
             surface_make_linear(gradientTexture, FMT_RGBA16, 4, PPU_H);

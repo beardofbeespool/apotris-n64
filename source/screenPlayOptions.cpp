@@ -1,4 +1,7 @@
 #include "logging.h"
+#ifdef APOTRIS_N64
+#include "n64/twoplayer.hpp"
+#endif
 #include "matchmakingQueue.hpp"
 #include "multiplayerClasses.h"
 #include "rumblePatterns.hpp"
@@ -441,6 +444,9 @@ void PlayOptionScene::start() {
 
     startGame(newOptions, (int)randNext());
 
+#ifdef APOTRIS_N64
+    n64TwoPlayerRequested = (name() == "2P Battle");
+#endif
     gameLoop();
 }
 

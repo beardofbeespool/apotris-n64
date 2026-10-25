@@ -72,8 +72,8 @@ Swap: `attackAnimationTimers`, `botClearTimer`, `botIncomingHeight`. Shared:
 
 - text.cpp: `allocatedTiles`, `textArea` (text tiles are allocated in the
   world's VRAM): swap.
-- main.cpp: `paused` (pausing pauses both), `shake`, `gameSeconds`,
-  `gradientTable`, `gradientEnabled`: swap; `savefile`, `frameCounter`,
+- main.cpp: `shake`, `gameSeconds`, `gradientTable`, `gradientEnabled`: swap;
+  `paused`: shared (pausing pauses both); `savefile`, `frameCounter`,
   `canDraw`, `multiplayer`, `playingBotGame`, `nextSeed`: shared.
 - The scene: `GameScene` keeps per-game state in members (`counted`, timers...).
   Each player gets their own scene object, and the global `scene` is swapped.
@@ -82,15 +82,49 @@ Swap: `attackAnimationTimers`, `botClearTimer`, `botIncomingHeight`. Shared:
 - Shared and constant: sprites.cpp tables, tetromino.cpp grade tables,
   BlockEngine fumen settings, bot tuning, audio.
 
+## Phase 2 (done): two games side by side
+
+- Each file's per-player globals are listed with `N64_PLAYER_STATE()`
+  (`include/n64/player_state.hpp`): game.cpp, multiplayer.cpp, text.cpp,
+  main.cpp. The live set and a stash are swapped when the player changes;
+  plain arrays are swapped with memcpy. `paused` is shared: the pause menu
+  runs inside one player's turn, so pausing pauses both.
+- `source/n64/twoplayer.cpp`: `n64SwitchPlayer()` swaps that state, selects the
+  player's world and controller. `SplitScene` runs a `GameScene` per player.
+  Player 2's world starts as a copy of player 1's (font, palettes) and gets its
+  own `Game` with the same options.
+- Switching costs about 0.3 ms (mostly the board arrays), so each pass over
+  the players starts with the one already live: two switches per frame.
+  Inside the game's own blocking loops (pause, end screen) the live player is
+  restored after each call.
+- Rendering only needs each player's world, which keeps a snapshot of the
+  player's backdrop gradient, so it switches worlds without swapping state.
+- Each half shows GBA columns 42-202 of that player's screen; tiles and sprites
+  outside are skipped. The hold box and queue frames lose about 3 pixels at the
+  outer edges. All 5 queue pieces fit.
+- Controllers 1 and 2 are read in one Joybus transaction. Player 2 uses player
+  1's button mapping for now.
+- "2P Battle" in the Play menu (N64 only) starts it. For now both players play
+  their own Marathon game; "Multi Battle" (link cable and online) is hidden on
+  N64.
+
+Checked in ares: separate pieces, holds, queues and scores, each driven only by
+its own controller; pausing, resuming and quitting to the menu; single player
+afterwards (pixel for pixel as before, per the compare build).
+
+Speed in ares during a two-player game: about 13 ms of work per frame, 59-60
+fps with an occasional missed frame, input on screen after about 17 ms.
+Rendering is about 4.5 ms per player, of which sprites are 2.9 ms. Single
+player is unchanged.
+
+Known gaps, for the next phases: when one player's game ends, its end screen
+runs while the other player is frozen; no battle rules yet.
+
 ## Next phases
 
-2. A player context holding the swapped variables, a second world and scene,
-   controller 2, and both worlds rendered side by side. Two independent games
-   first, to flush out any state the audit missed (it shows as one player's
-   effect appearing on the other's board).
 3. Versus: garbage exchange through the existing battle code, win and loss,
    a "2P Battle" entry in the Play menu, results.
-4. Layout and speed: each half shows hold, board and next queue (about 160 px
-   wide); score, attack and timer above and below the boards. Rendering two
-   worlds roughly doubles the frame work (about 10-12 ms), so input to screen in
-   two-player will be about 12-14 ms; single player is unaffected.
+4. Layout and speed: score, attack and timer above and below the boards, and
+   the frame edges. Speed first: sprites cost 2.9 ms per player, and caching
+   their converted textures between frames (the sprite tiles have dirty
+   flags) should bring two-player back to a comfortable margin.

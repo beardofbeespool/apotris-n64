@@ -404,7 +404,7 @@ Sound:
 
   It needs `openmpt123`, `ffmpeg` and libdragon's `audioconv64`. Only add music you have the right to use; it stays on your SD card and never goes into the ROM.
 
-Not done yet: multiplayer. The link cable and online modes need a second console or a network; local multiplayer would need a split-screen layout with two full-size boards.
+Two players (in progress): "2P Battle" in the Play menu splits the screen between controller 1 and controller 2, each with a full-size board, hold box and 5-piece queue. For now each player plays their own Marathon game; battle rules (garbage, winning and losing) come next. Player 2 uses player 1's button mapping. The link cable and online modes ("Multi Battle") need a second console or a network and are hidden on N64. See `docs/n64-two-player.md` for how it works.
 
 ### Android
 You will need the Android NDK installed and configured.

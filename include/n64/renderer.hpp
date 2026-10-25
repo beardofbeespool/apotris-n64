@@ -105,6 +105,11 @@ struct World {
 
     // the sprite table; obj_buffer points at the current world's
     SpriteAttributes* oam;
+
+    // The backdrop gradient (GBA colours, one per line) as it was when the
+    // world was last drawn, see ppuSnapshotGradient()
+    u16 gradient[160];
+    bool gradientEnabled;
 };
 
 constexpr int WORLD_COUNT = 2;
@@ -125,3 +130,7 @@ inline BgCharblockAll& charblocks() {
 // Make a world current: the game's drawing and the renderer both use it
 void ppuSelectWorld(int index);
 int ppuCurrentWorld();
+
+// Copies the game's backdrop gradient into the current world, so the world
+// can be rendered later without the rest of its player's state
+void ppuSnapshotGradient();

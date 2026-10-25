@@ -1634,3 +1634,13 @@ HSV_COLOR rgb2hsv(int r, int g, int b) {
 
     return HSV_COLOR{(int)h, s, v};
 }
+
+#ifdef APOTRIS_N64
+#include "n64/player_state.hpp"
+
+// N64 two-player: per-player state kept in main.cpp (docs/n64-two-player.md)
+#define N64_MAIN_STATE(X)                                                      \
+    X(shake) X(gameSeconds) X(gradientTable) X(gradientEnabled)
+
+N64_PLAYER_STATE(n64SwapMainState, N64_MAIN_STATE)
+#endif

@@ -623,3 +623,13 @@ bool GameScene::reconnect() {
 
     return true;
 }
+
+#ifdef APOTRIS_N64
+#include "n64/player_state.hpp"
+
+// N64 two-player: battle state kept per player (docs/n64-two-player.md)
+#define N64_BATTLE_STATE(X)                                                    \
+    X(botGame) X(attackAnimationTimers) X(botClearTimer) X(botIncomingHeight)
+
+N64_PLAYER_STATE(n64SwapBattleState, N64_BATTLE_STATE)
+#endif

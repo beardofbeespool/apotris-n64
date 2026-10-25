@@ -3,6 +3,7 @@
 
 #include "audio_files.h"
 #include "def.h"
+#include "n64/twoplayer.hpp"
 #include "multiplayerClasses.h"
 #include "matchmakingQueue.hpp"
 #include "scene.hpp"
@@ -21,7 +22,7 @@
 // The picture is drawn by the RDP (ppuRenderFrameRdp). Build with
 // -DAPOTRIS_N64_CPU_PPU to draw it on the CPU instead, to compare the two.
 extern void ppuRenderFrame(void* dst, int strideBytes);
-extern void ppuRenderFrameRdp(int originX, int originY);
+extern void ppuRenderFrameRdp(int originX, int originY, int viewX0, int viewX1);
 
 void audioInit();
 void audioUpdate();
@@ -162,46 +163,57 @@ uint32_t inputReadAt;         // when the input being drawn was read
 uint32_t inputReadTicks;      // how long that read took
 uint32_t missedVblanks;       // frames that were not ready in time, for the log
 
-joypad_inputs_t directInput;
-bool directInputValid = false;
+// Controller state of each player (port 1 and 2). In two-player mode
+// n64SwitchPlayer() picks which one the game's key functions see.
+constexpr int INPUT_PORTS = 2;
+joypad_inputs_t directInput[INPUT_PORTS];
+bool directInputValid[INPUT_PORTS] = {};
+int inputPort = 0;
 
-// Reads controller 1 right now (libdragon only reads the controllers at
-// vblank). Returns false when there is no controller, so the caller can
-// fall back to libdragon's copy.
-bool readControllerNow(joypad_inputs_t* in) {
+// Reads the first `ports` controllers right now, in one transaction
+// (libdragon only reads the controllers at vblank). A port that does not
+// answer is marked invalid, so the caller can fall back to libdragon's copy.
+void readControllersNow(int ports) {
     uint8_t input[JOYBUS_BLOCK_SIZE] = {};
     uint8_t output[JOYBUS_BLOCK_SIZE];
-    input[0] = 1;       // bytes sent
-    input[1] = 4;       // bytes received
-    input[2] = 0x01;    // N64 controller read
-    memset(&input[3], 0xff, 4);
-    input[7] = 0xfe;    // end of commands
+    for (int p = 0; p < ports; p++) {
+        uint8_t* cmd = &input[p * 7];
+        cmd[0] = 1;         // bytes sent
+        cmd[1] = 4;         // bytes received
+        cmd[2] = 0x01;      // N64 controller read
+        memset(&cmd[3], 0xff, 4);
+    }
+    input[ports * 7] = 0xfe;    // end of commands
     input[JOYBUS_BLOCK_SIZE - 1] = 0x01;
     joybus_exec(input, output);
 
-    // the receive length comes back with error flags when nothing answers
-    if (output[1] & 0xc0)
-        return false;
+    for (int p = 0; p < ports; p++) {
+        const uint8_t* reply = &output[p * 7];
+        // the receive length comes back with error flags when nothing answers
+        directInputValid[p] = !(reply[1] & 0xc0);
+        if (!directInputValid[p])
+            continue;
 
-    const uint8_t* r = &output[3];
-    *in = {};
-    in->btn.a = !!(r[0] & 0x80);
-    in->btn.b = !!(r[0] & 0x40);
-    in->btn.z = !!(r[0] & 0x20);
-    in->btn.start = !!(r[0] & 0x10);
-    in->btn.d_up = !!(r[0] & 0x08);
-    in->btn.d_down = !!(r[0] & 0x04);
-    in->btn.d_left = !!(r[0] & 0x02);
-    in->btn.d_right = !!(r[0] & 0x01);
-    in->btn.l = !!(r[1] & 0x20);
-    in->btn.r = !!(r[1] & 0x10);
-    in->btn.c_up = !!(r[1] & 0x08);
-    in->btn.c_down = !!(r[1] & 0x04);
-    in->btn.c_left = !!(r[1] & 0x02);
-    in->btn.c_right = !!(r[1] & 0x01);
-    in->stick_x = (int8_t)r[2];
-    in->stick_y = (int8_t)r[3];
-    return true;
+        const uint8_t* r = &reply[3];
+        joypad_inputs_t* in = &directInput[p];
+        *in = {};
+        in->btn.a = !!(r[0] & 0x80);
+        in->btn.b = !!(r[0] & 0x40);
+        in->btn.z = !!(r[0] & 0x20);
+        in->btn.start = !!(r[0] & 0x10);
+        in->btn.d_up = !!(r[0] & 0x08);
+        in->btn.d_down = !!(r[0] & 0x04);
+        in->btn.d_left = !!(r[0] & 0x02);
+        in->btn.d_right = !!(r[0] & 0x01);
+        in->btn.l = !!(r[1] & 0x20);
+        in->btn.r = !!(r[1] & 0x10);
+        in->btn.c_up = !!(r[1] & 0x08);
+        in->btn.c_down = !!(r[1] & 0x04);
+        in->btn.c_left = !!(r[1] & 0x02);
+        in->btn.c_right = !!(r[1] & 0x01);
+        in->stick_x = (int8_t)r[2];
+        in->stick_y = (int8_t)r[3];
+    }
 }
 
 // Called right after the vblank that starts showing the latest frame
@@ -237,16 +249,17 @@ void readInputLate(uint32_t vblank, uint32_t busyTicks) {
     }
 
     inputReadAt = get_ticks();
-    directInputValid = readControllerNow(&directInput);
+    readControllersNow(n64TwoPlayerActive() ? 2 : 1);
     inputReadTicks = get_ticks() - inputReadAt;
 }
 
-u32 currentKeys = 0;
-u32 previousKeys = 0;
+u32 currentKeys[INPUT_PORTS] = {};
+u32 previousKeys[INPUT_PORTS] = {};
 
 u32 readPad() {
-    joypad_inputs_t in =
-        directInputValid ? directInput : joypad_get_inputs(JOYPAD_PORT_1);
+    joypad_inputs_t in = directInputValid[inputPort]
+                             ? directInput[inputPort]
+                             : joypad_get_inputs((joypad_port_t)inputPort);
     u32 k = 0;
 
     if (in.btn.a)
@@ -369,7 +382,6 @@ void vsync() {
     uint32_t logicTicks = logicStart ? drawStart - logicStart : 0;
 
     onVBlank();
-    audioUpdate();
 
     if (framebuffer == nullptr)
         framebuffer = display_get();
@@ -391,7 +403,12 @@ void vsync() {
     rdpq_detach_show();
 #else
     rdpq_attach_clear(framebuffer, NULL);
-    ppuRenderFrameRdp(ORIGIN_X, ORIGIN_Y);
+    if (n64TwoPlayerActive()) {
+        n64RenderTwoPlayer();
+    } else {
+        ppuSnapshotGradient();
+        ppuRenderFrameRdp(ORIGIN_X, ORIGIN_Y, 0, SCREEN_WIDTH);
+    }
     rdpq_detach_show();
 #endif
     // the RDP reads the game's tile data straight from RAM, so the game
@@ -399,6 +416,10 @@ void vsync() {
     uint32_t rdpWaitStart = get_ticks();
     rspq_wait();
     uint32_t rdpWaitTicks = get_ticks() - rdpWaitStart;
+
+    // Audio after the picture: the mixer runs on the RSP, which also passes
+    // the drawing commands to the RDP, so mixing during drawing slows it down
+    audioUpdate();
 
 #ifdef APOTRIS_N64_PPU_COMPARE
     compareWithCpu(framebuffer);
@@ -447,21 +468,25 @@ s16 sinLut(int angle) {
 
 // --- input ---------------------------------------------------------------
 
+void n64SetInputPort(int port) { inputPort = port; }
+
 void key_poll() {
     joypad_poll();
-    previousKeys = currentKeys;
-    currentKeys = readPad();
+    previousKeys[inputPort] = currentKeys[inputPort];
+    currentKeys[inputPort] = readPad();
 }
 
-uint32_t key_is_down(uint32_t key) { return currentKeys & key; }
-uint32_t key_hit(uint32_t key) { return (~previousKeys & currentKeys) & key; }
-uint32_t key_released(uint32_t key) {
-    return (previousKeys & ~currentKeys) & key;
+uint32_t key_is_down(uint32_t key) { return currentKeys[inputPort] & key; }
+uint32_t key_hit(uint32_t key) {
+    return (~previousKeys[inputPort] & currentKeys[inputPort]) & key;
 }
-uint32_t keys_raw() { return currentKeys; }
+uint32_t key_released(uint32_t key) {
+    return (previousKeys[inputPort] & ~currentKeys[inputPort]) & key;
+}
+uint32_t keys_raw() { return currentKeys[inputPort]; }
 uint32_t key_first() {
     for (u32 bit = 0; bit < 32; bit++) {
-        if (currentKeys & (1u << bit))
+        if (currentKeys[inputPort] & (1u << bit))
             return 1u << bit;
     }
     return KEY_FULL - 1;

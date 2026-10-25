@@ -255,6 +255,11 @@ void sceneSwitcher(const std::string& str) {
 #endif
     } else if (str == "CPU Battle" || str == "Battle") {
         changeScene([]() { return new CPUBattleScene(); }, Transitions::FADE);
+#ifdef APOTRIS_N64
+    } else if (str == "2P Battle") {
+        changeScene([]() { return new TwoPlayerOptionScene(); },
+                    Transitions::FADE);
+#endif
     } else if (str == "Training") {
         changeScene([]() { return new TrainingScene(); }, Transitions::FADE);
     } else if (str == "Website") {

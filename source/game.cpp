@@ -1,4 +1,7 @@
 #include "blockEngine.hpp"
+#ifdef APOTRIS_N64
+#include "n64/twoplayer.hpp"
+#endif
 #include "def.h"
 #include "logging.h"
 #include "matchmakingQueue.hpp"
@@ -1812,6 +1815,13 @@ void showClearText() {
 }
 
 void gameLoop() {
+#ifdef APOTRIS_N64
+    if (n64TwoPlayerRequested) {
+        changeScene([]() { return n64CreateSplitScene(); }, Transitions::FADE);
+        exitGame = false;
+        return;
+    }
+#endif
     changeScene([]() { return new GameScene(); }, Transitions::FADE);
 
     exitGame = false;
@@ -2721,12 +2731,19 @@ static inline int attackZoneNibble(int zone) {
     return 4;
 }
 
+// what showAttackBar() last drew, so it can skip unchanged frames (at file
+// scope so the N64 two-player mode can keep one copy per player)
+static std::vector<int> attackBarCachedIds;
+static std::vector<int> attackBarCachedAmounts;
+static bool attackBarLastWasEmpty = true;
+static int attackBarLastLayer = 0;
+
 void showAttackBar(const std::list<Garbage>& garbage, int max, int x,
                    int palette, int layer) {
-    static std::vector<int> cachedIds;
-    static std::vector<int> cachedAmounts;
-    static bool lastWasEmpty = true;
-    static int lastLayer = 0;
+    std::vector<int>& cachedIds = attackBarCachedIds;
+    std::vector<int>& cachedAmounts = attackBarCachedAmounts;
+    bool& lastWasEmpty = attackBarLastWasEmpty;
+    int& lastLayer = attackBarLastLayer;
 
     bool flashOn = (attackFlashTimer < attackFlashMax / 2);
     int p = 8 + (layer < 0 ? 16 : 0);
@@ -4486,3 +4503,24 @@ void showSpawn() {
                       game->rotationSystem == SDRS));
     }
 }
+
+#ifdef APOTRIS_N64
+#include "n64/player_state.hpp"
+
+// N64 two-player: the game screen's per-player state (docs/n64-two-player.md)
+#define N64_GAME_SCREEN_STATE(X)                                               \
+    X(game) X(current) X(previous) X(glow) X(latestDrop) X(clearTimer)         \
+    X(eventPauseTimer) X(flashTimer) X(wiggleTimer) X(fullMeterTimer)          \
+    X(attackFlashTimer) X(gridUpdateTimer) X(restartTimer) X(goalLineHeight)   \
+    X(previousHeight) X(previousPalette) X(push) X(peek) X(peekShift)          \
+    X(peekValue) X(damp) X(dampTimer) X(shakeBuff) X(shakeVelocity)            \
+    X(rainbow) X(rainbowTimer) X(rainbowIncreasing) X(refresh) X(refreshSkin)  \
+    X(holdingSave) X(onStates) X(effectList) X(floatingList)                   \
+    X(placeEffectList) X(clearTypeText) X(creditCurrentHeight)                 \
+    X(creditLastRead) X(creditRefresh) X(pawnSprite) X(pawnShadow)             \
+    X(holdSprite) X(holdFrameSprite) X(moveSprites) X(queueSprites)            \
+    X(queueFrameSprites) X(attackBarCachedIds) X(attackBarCachedAmounts)       \
+    X(attackBarLastWasEmpty) X(attackBarLastLayer)
+
+N64_PLAYER_STATE(n64SwapGameScreenState, N64_GAME_SCREEN_STATE)
+#endif

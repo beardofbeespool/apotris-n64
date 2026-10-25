@@ -705,4 +705,21 @@ public:
     std::string name() { return "CPU Battle"; };
 };
 
+#ifdef APOTRIS_N64
+// Local two-player split-screen. For now each player plays their own
+// Marathon game side by side; battle rules come next.
+class TwoPlayerOptionScene : public PlayOptionScene {
+public:
+    BlockEngine::Modes getMode() { return BlockEngine::MARATHON; };
+
+    std::list<Element*> getElementList() {
+        return {
+            new LevelSelectorElement(1, 20),
+        };
+    };
+
+    std::string name() { return "2P Battle"; };
+};
+#endif
+
 #endif

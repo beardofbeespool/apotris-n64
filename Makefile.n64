@@ -19,7 +19,8 @@ SRC_CPP = \
 	source/screenMultiplayerResults.cpp source/screenPlayOptions.cpp \
 	source/screenSkinEditor.cpp source/screenTitle.cpp source/skinFile.cpp \
 	source/sprites.cpp source/tetromino.cpp source/text.cpp \
-	source/n64/liba_n64.cpp source/n64/ppu.cpp
+	source/n64/liba_n64.cpp source/n64/ppu.cpp \
+	source/n64/twoplayer.cpp
 SRC_C = source/xoshiro128plusplus.c
 
 # Binary assets converted by tools/bin2s.py into gen/*_bin.{S,h}

@@ -76,13 +76,17 @@ const std::list<std::string> menuOptions = {
 const std::list<std::string> gameOptions = {
     "Marathon",     "Sprint",  "Dig",    "Ultra", "Blitz", "Combo",
     "Survival",     "Classic", "Master", "Death", "Zen",
-#ifndef SWITCH
+#if !defined(SWITCH) && !defined(APOTRIS_N64)
     "Multi Battle",
 #endif
 #ifdef GBA
 //"Wireless Pak", "Wired Pak",
 #endif
-    "CPU Battle",   "Training"};
+    "CPU Battle",
+#ifdef APOTRIS_N64
+    "2P Battle",
+#endif
+    "Training"};
 const std::list<std::string> settingsOptions = {
     "Graphics", "Audio", "Controls", "Handling", "Gameplay", "Saving"};
 

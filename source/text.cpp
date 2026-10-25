@@ -380,3 +380,12 @@ IWRAM_CODE void naprintSpriteOffset(std::string str, int tile, int col) {
 }
 
 int textAllocateTile() { return allocateStart + (allocatedTiles++); }
+
+#ifdef APOTRIS_N64
+#include "n64/player_state.hpp"
+
+// N64 two-player: text tiles are allocated in each player's own VRAM
+#define N64_TEXT_STATE(X) X(allocatedTiles) X(textArea)
+
+N64_PLAYER_STATE(n64SwapTextState, N64_TEXT_STATE)
+#endif
