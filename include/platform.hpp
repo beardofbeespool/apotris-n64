@@ -84,7 +84,12 @@
 
 extern void onVBlank();
 
+#ifdef APOTRIS_N64
+// the current world's sprite table, see n64/renderer.hpp
+extern OBJ_ATTR* obj_buffer;
+#else
 extern OBJ_ATTR obj_buffer[128];
+#endif
 
 enum {
     ShapeSquare,

@@ -135,9 +135,9 @@ INLINE void setTile(int sbb, int x, int y, u32 value) {
 
     u16 gbaTile =
         0x1000 * t.palette + 0x400 * t.flipx + 0x800 * t.flipy + t.index;
-    tng::bg_screenblocks[sbb][((y < 0) ? (y + 32) : y) * 32 + x] = gbaTile;
+    tng::screenblocks()[sbb][((y < 0) ? (y + 32) : y) * 32 + x] = gbaTile;
 
-    tng::bg_screenblock_fill_screen_p[sbb] = false;
+    tng::world->bg_screenblock_fill_screen[sbb] = false;
 
 }
 
@@ -211,13 +211,13 @@ constexpr int min(int a, int b) { return (a < b) ? a : b; }
 constexpr int max(int a, int b) { return (a > b) ? a : b; }
 
 INLINE void setSpriteTile(int index, u8 tx, u8 ty, u8 width, const void* src) {
-    memcpy32(&tng::sprite_tile_images[index + ty * width + tx], src, 8);
+    memcpy32(&tng::world->sprite_tile_images[index + ty * width + tx], src, 8);
 
 }
 
 INLINE void setSpritePixel(int index, u8 tx, u8 ty, u8 width, u8 x, u8 y,
                            u8 color) {
-    tng::ImageTile* t = &tng::sprite_tile_images[index + ty * width + tx];
+    tng::ImageTile* t = &tng::world->sprite_tile_images[index + ty * width + tx];
 
     const u32 shift = x * 4;
     t->rows[y] = (t->rows[y] & ~(0xfu << shift)) | ((color & 0xfu) << shift);
@@ -225,21 +225,21 @@ INLINE void setSpritePixel(int index, u8 tx, u8 ty, u8 width, u8 x, u8 y,
 }
 
 INLINE void setSpriteTileRow(int index, int y, int n) {
-    tng::ImageTile* tile = &tng::sprite_tile_images[index];
+    tng::ImageTile* tile = &tng::world->sprite_tile_images[index];
 
     tile->rows[y] |= n;
 
 }
 
 INLINE void setTilesetPixel(int cbb, int index, int x, int y, u8 color) {
-    tng::ImageTile* tile = &tng::bg_charblocks[cbb][index];
+    tng::ImageTile* tile = &tng::charblocks()[cbb][index];
 
     tile->rows[y] |= (color) << (x * 4);
 
 }
 
 INLINE void setTileRow(int tileset, int index, int row, u32 data) {
-    tng::ImageTile* tile = &tng::bg_charblocks[tileset][index];
+    tng::ImageTile* tile = &tng::charblocks()[tileset][index];
 
     tile->rows[row] = data;
 
@@ -348,7 +348,7 @@ enum class ScaleMode : u8 {
 };
 
 inline void setSbbFillScreen(int sbb) {
-    tng::bg_screenblock_fill_screen_p[sbb] = true;
+    tng::world->bg_screenblock_fill_screen[sbb] = true;
 }
 
 bool keyboardNameInput(std::string* result, size_t length);

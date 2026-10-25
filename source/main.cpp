@@ -51,7 +51,9 @@ using namespace BlockEngine;
 int getClassicPalette();
 void genWidths();
 
+#ifndef APOTRIS_N64
 OBJ_ATTR obj_buffer[128];
+#endif
 
 int frameCounter = 1;
 

@@ -21,51 +21,6 @@
 // Tiling Next Gen
 namespace tng {
 
-class LayerInfo {
-public:
-    int id = -1;
-    bool enabled = true;
-    int priority = -1;
-    int sbb = 0;
-    int cbb = 0;
-    int scroll_x = 0;
-    int scroll_y = 0;
-};
-
-static LayerInfo layerInfo[4];
-
-enum BlendMode {
-    BLEND_OFF = 0,
-    BLEND_STD = 1,
-    BLEND_WHITE = 2,
-    BLEND_BLACK = 3,
-};
-
-std::array<bool, BG_LAYERS_COUNT> blend_top_bg = {};
-bool blend_top_sprites = false;
-bool blend_top_backdrop = false;
-std::array<bool, BG_LAYERS_COUNT> blend_bottom_bg = {};
-bool blend_bottom_sprites = false;
-bool blend_bottom_backdrop = false;
-
-BlendMode blend_mode = BLEND_OFF;
-
-// Mosaic size - 1
-u8 bg_mosaic_x = 0;
-u8 bg_mosaic_y = 0;
-
-enum PaletteType {
-    PALETTE_BG = 0u,
-    PALETTE_SPRITE = 1u,
-};
-
-// The palettes now use RGBA5551 format.
-static std::array<std::array<std::array<u16, 16>, 16>, 2> palettes = {};
-
-static std::array<std::array<u16, 16>, 16>& palettes_bg = palettes[PALETTE_BG];
-static std::array<std::array<u16, 16>, 16>& palettes_sprite =
-    palettes[PALETTE_SPRITE];
-
 constexpr u16 color_rgb5a1_unsafe(u8 c_r, u8 c_g, u8 c_b, u8 c_a = 1) {
     return (c_r << 11) | (c_g << 6) | (c_b << 1) | (c_a);
 }
@@ -98,42 +53,40 @@ constexpr void palette_tng_to_gba(const u16* src, u16* dst, size_t count) {
     }
 }
 
-alignas(16) ImageTile sprite_tile_images[SPRITE_TILE_COUNT];
-
-bool sprite_tile_dirty_flag[SPRITE_TILE_COUNT] = {};
-
-// Using the same global sprite attributes
-SpriteAttributes* sprite_obj_attrs = obj_buffer;
-
-bool sprite_obj_dirty_flag[SPRITE_OBJ_COUNT] = {};
-
-alignas(16) static u8 bg_storage[BG_TILEMAP_STORAGE_SIZE] = {};
-
-BgScreenblockAll& bg_screenblocks = *(BgScreenblockAll*)&bg_storage;
-BgCharblockAll& bg_charblocks = *(BgCharblockAll*)&bg_storage;
-static_assert(sizeof(bg_screenblocks) == sizeof(bg_storage));
-static_assert(sizeof(bg_charblocks) == sizeof(bg_storage));
-
-std::array<bool, std::extent_v<BgScreenblockAll>> bg_screenblock_fill_screen{};
-bool* const bg_screenblock_fill_screen_p = bg_screenblock_fill_screen.data();
+World worlds[WORLD_COUNT];
+World* world = &worlds[0];
 
 } /* namespace tng */
 
-using tng::LayerInfo;
-using tng::layerInfo;
+namespace {
 
+// The sprite tables of the worlds (SpriteAttributes is not complete in
+// renderer.hpp, so they live here and World points at them)
+OBJ_ATTR oamStorage[tng::WORLD_COUNT][tng::SPRITE_OBJ_COUNT];
+
+struct WorldSetup {
+    WorldSetup() {
+        for (int i = 0; i < tng::WORLD_COUNT; i++)
+            tng::worlds[i].oam = oamStorage[i];
+    }
+} worldSetup;
+
+int currentWorld = 0;
+
+} // namespace
+
+OBJ_ATTR* obj_buffer = oamStorage[0];
+
+void ppuSelectWorld(int index) {
+    currentWorld = index;
+    tng::world = &tng::worlds[index];
+    obj_buffer = tng::world->oam;
+}
+
+int ppuCurrentWorld() { return currentWorld; }
 
 // Clip windows used by the renderer (screen coordinates, GBA 240x160 space)
 namespace cr {
-
-struct ClipWindow {
-    int left = 0, top = 0, right = 0, bottom = 0;
-    bool enabled = false;
-    bool invert = false;
-};
-
-ClipWindow bg_clip_windows[4];
-ClipWindow sprites_clip_window;
 
 struct SceneOffset {
     int left, right;
@@ -143,7 +96,7 @@ constexpr SceneOffset SCENE_OFFSET_CENTERED = {0, 240};
 } // namespace cr
 
 void toggleBG(int layer, bool state) {
-    layerInfo[layer].enabled = state;
+    tng::world->layers[layer].enabled = state;
 }
 
 void toggleSprites(bool state) {
@@ -157,9 +110,9 @@ INLINE u8 buildLayerPrio(int layer, int priority) {
 void buildBG(int layer, int cbb, int sbb, int size, int prio, int mos) {
     int p = buildLayerPrio(layer, prio);
 
-    layerInfo[layer].priority = p;
-    layerInfo[layer].sbb = sbb;
-    layerInfo[layer].cbb = cbb;
+    tng::world->layers[layer].priority = p;
+    tng::world->layers[layer].sbb = sbb;
+    tng::world->layers[layer].cbb = cbb;
 
 }
 
@@ -169,29 +122,29 @@ void showSprites(int n) {
 
 void loadPalette(int palette, int index, const void* src, int count) {
     tng::palette_gba_to_tng((const u16*)src,
-                            &tng::palettes[palette / 16][palette % 16][index],
+                            &tng::world->palettes[palette / 16][palette % 16][index],
                             count);
 
 }
 
 
 void loadTiles(int tileset, int index, const void* src, int count) {
-    memcpy32_fast(&tng::bg_charblocks[tileset][index], src, count * 8);
+    memcpy32_fast(&tng::charblocks()[tileset][index], src, count * 8);
 
 }
 
 void loadTilemap(int tilemap, int index, const void* src, int count) {
-    u16* dst = tng::bg_screenblocks[tilemap];
+    u16* dst = tng::screenblocks()[tilemap];
     memcpy16_fast(&dst[index], src, count);
 
-    tng::bg_screenblock_fill_screen[tilemap] = false;
+    tng::world->bg_screenblock_fill_screen[tilemap] = false;
 
 }
 
 void clearTilemap(int tilemap) {
-    memset16(tng::bg_screenblocks[tilemap], 0, 32 * 32);
+    memset16(tng::screenblocks()[tilemap], 0, 32 * 32);
 
-    tng::bg_screenblock_fill_screen[tilemap] = false;
+    tng::world->bg_screenblock_fill_screen[tilemap] = false;
 
 }
 
@@ -209,7 +162,7 @@ void sprite_set_pos(OBJ_ATTR* sprite, int x, int y) {
 
     int index = sprite - obj_buffer;
     assert(index >= 0 && index < 128);
-    tng::sprite_obj_dirty_flag[index] = true;
+    tng::world->sprite_obj_dirty_flag[index] = true;
 };
 
 void sprite_set_attr(OBJ_ATTR* sprite, int shape, int size, int tile_start,
@@ -237,76 +190,76 @@ void sprite_set_attr(OBJ_ATTR* sprite, int shape, int size, int tile_start,
 
     int index = sprite - obj_buffer;
     assert(index >= 0 && index < 128);
-    tng::sprite_obj_dirty_flag[index] = true;
+    tng::world->sprite_obj_dirty_flag[index] = true;
 };
 
 void setLayerScroll(int layer, int x, int y) {
-    layerInfo[layer].scroll_x = x;
-    layerInfo[layer].scroll_y = y;
+    tng::world->layers[layer].scroll_x = x;
+    tng::world->layers[layer].scroll_y = y;
 
 }
 
 void loadSpriteTiles(int index, const void* src, int lengthX, int lengthY) {
-    memcpy32_fast(&tng::sprite_tile_images[index], src, lengthX * lengthY * 8);
+    memcpy32_fast(&tng::world->sprite_tile_images[index], src, lengthX * lengthY * 8);
     for (int i = 0; i < lengthX + lengthY; i++) {
-        tng::sprite_tile_dirty_flag[index + i] = true;
+        tng::world->sprite_tile_dirty_flag[index + i] = true;
     }
 
 }
 
 void loadSpriteTilesPartial(int index, const void* src, int tx, int ty,
                             int lengthX, int lengthY, int rowLength) {
-    memcpy32_fast(&tng::sprite_tile_images[index + ty * rowLength + tx], src,
+    memcpy32_fast(&tng::world->sprite_tile_images[index + ty * rowLength + tx], src,
                   lengthX * lengthY * 8);
     for (int i = 0; i < lengthX + lengthY; i++) {
-        tng::sprite_tile_dirty_flag[index + ty * rowLength + tx + i] = true;
+        tng::world->sprite_tile_dirty_flag[index + ty * rowLength + tx + i] = true;
     }
 
 }
 
 void clearSpriteTiles(int index, int lengthX, int lengthY) {
-    memset32_fast(&tng::sprite_tile_images[index], 0, lengthX * lengthY * 8);
+    memset32_fast(&tng::world->sprite_tile_images[index], 0, lengthX * lengthY * 8);
     for (int i = 0; i < lengthX + lengthY; i++) {
-        tng::sprite_tile_dirty_flag[index + i] = true;
+        tng::world->sprite_tile_dirty_flag[index + i] = true;
     }
 
 }
 
 void clearSpriteTile(int index, int tx, int ty, int width) {
-    memset32_fast(&tng::sprite_tile_images[index + ty * width + tx], 0, 8);
-    tng::sprite_tile_dirty_flag[index + ty * width + tx] = true;
+    memset32_fast(&tng::world->sprite_tile_images[index + ty * width + tx], 0, 8);
+    tng::world->sprite_tile_dirty_flag[index + ty * width + tx] = true;
 
 }
 
 void enableBlend(int info) {
-    tng::blend_mode = (tng::BlendMode)((info >> 6) & 0x03);
+    tng::world->blend_mode = (tng::BlendMode)((info >> 6) & 0x03);
     u32 blend_top = info & 0x3f;
-    tng::blend_top_bg[0] = blend_top & 0b1;
-    tng::blend_top_bg[1] = blend_top & 0b10;
-    tng::blend_top_bg[2] = blend_top & 0b100;
-    tng::blend_top_bg[3] = blend_top & 0b1000;
-    tng::blend_top_sprites = blend_top & 0b10000;
-    tng::blend_top_backdrop = blend_top & 0b100000;
+    tng::world->blend_top_bg[0] = blend_top & 0b1;
+    tng::world->blend_top_bg[1] = blend_top & 0b10;
+    tng::world->blend_top_bg[2] = blend_top & 0b100;
+    tng::world->blend_top_bg[3] = blend_top & 0b1000;
+    tng::world->blend_top_sprites = blend_top & 0b10000;
+    tng::world->blend_top_backdrop = blend_top & 0b100000;
     u32 blend_bottom = (info >> 8) & 0x3f;
-    tng::blend_bottom_bg[0] = blend_bottom & 0b1;
-    tng::blend_bottom_bg[1] = blend_bottom & 0b10;
-    tng::blend_bottom_bg[2] = blend_bottom & 0b100;
-    tng::blend_bottom_bg[3] = blend_bottom & 0b1000;
-    tng::blend_bottom_sprites = blend_bottom & 0b10000;
-    tng::blend_bottom_backdrop = blend_bottom & 0b100000;
+    tng::world->blend_bottom_bg[0] = blend_bottom & 0b1;
+    tng::world->blend_bottom_bg[1] = blend_bottom & 0b10;
+    tng::world->blend_bottom_bg[2] = blend_bottom & 0b100;
+    tng::world->blend_bottom_bg[3] = blend_bottom & 0b1000;
+    tng::world->blend_bottom_sprites = blend_bottom & 0b10000;
+    tng::world->blend_bottom_backdrop = blend_bottom & 0b100000;
 
 
     blendInfo = info;
 }
 
 void setTiles(int tilemap, int index, int count, u32 value) {
-    u16* dst = tng::bg_screenblocks[tilemap];
+    u16* dst = tng::screenblocks()[tilemap];
     memset16(&dst[index], value, count);
 
     if (count == 32 * 32) {
-        tng::bg_screenblock_fill_screen[tilemap] = true;
+        tng::world->bg_screenblock_fill_screen[tilemap] = true;
     } else {
-        tng::bg_screenblock_fill_screen[tilemap] = false;
+        tng::world->bg_screenblock_fill_screen[tilemap] = false;
     }
 
 }
@@ -318,21 +271,21 @@ void clearSprites(int n) {
 }
 
 void setPaletteColor(int palette, int index, u16 color, int count) {
-    memset16(&tng::palettes[palette / 16][palette % 16][index],
+    memset16(&tng::world->palettes[palette / 16][palette % 16][index],
              tng::color_gba_to_tng(color), count);
 
 }
 
 u16 getPaletteColor(int palette, int index) {
     return tng::color_tng_to_gba(
-        tng::palettes[palette / 16][palette % 16][index]);
+        tng::world->palettes[palette / 16][palette % 16][index]);
 }
 
 void sprite_enable_mosaic(OBJ_ATTR* sprite) {
     sprite->mosaic = true;
     int index = sprite - obj_buffer;
     assert(index >= 0 && index < 128);
-    tng::sprite_obj_dirty_flag[index] = true;
+    tng::world->sprite_obj_dirty_flag[index] = true;
 }
 
 void sprite_set_size(OBJ_ATTR* sprite, FIXED size, int aff_id) {
@@ -352,7 +305,7 @@ void sprite_set_size(OBJ_ATTR* sprite, FIXED size, int aff_id) {
 
     int index = sprite - obj_buffer;
     assert(index >= 0 && index < 128);
-    tng::sprite_obj_dirty_flag[index] = true;
+    tng::world->sprite_obj_dirty_flag[index] = true;
 }
 
 void sprite_rotscale(OBJ_ATTR* sprite, FIXED sizex, FIXED sizey, int angle,
@@ -383,7 +336,7 @@ void sprite_rotscale(OBJ_ATTR* sprite, FIXED sizex, FIXED sizey, int angle,
 
     int index = sprite - obj_buffer;
     assert(index >= 0 && index < 128);
-    tng::sprite_obj_dirty_flag[index] = true;
+    tng::world->sprite_obj_dirty_flag[index] = true;
 };
 
 void sprite_enable_affine(OBJ_ATTR* sprite, int affineId, bool doubleSize) {
@@ -392,7 +345,7 @@ void sprite_enable_affine(OBJ_ATTR* sprite, int affineId, bool doubleSize) {
 
     int index = sprite - obj_buffer;
     assert(index >= 0 && index < 128);
-    tng::sprite_obj_dirty_flag[index] = true;
+    tng::world->sprite_obj_dirty_flag[index] = true;
 }
 
 void sprite_enable_flip(OBJ_ATTR* sprite, bool flipX, bool flipY) {
@@ -401,7 +354,7 @@ void sprite_enable_flip(OBJ_ATTR* sprite, bool flipX, bool flipY) {
 
     int index = sprite - obj_buffer;
     assert(index >= 0 && index < 128);
-    tng::sprite_obj_dirty_flag[index] = true;
+    tng::world->sprite_obj_dirty_flag[index] = true;
 }
 
 extern "C" {
@@ -419,7 +372,7 @@ u32 Sqrt(u32 n) { return std::sqrt(n); }
 
 void color_fade_palette(int palette, int index, const COLOR* src, COLOR color,
                         int count, u32 alpha) {
-    u16* dst = &tng::palettes[palette / 16][palette % 16][index];
+    u16* dst = &tng::world->palettes[palette / 16][palette % 16][index];
     tng::palette_tng_to_gba(dst, dst, count);
     color_fade(dst, src, color, count, alpha);
     tng::palette_gba_to_tng(dst, dst, count);
@@ -521,7 +474,7 @@ void color_adj_MEM_tng(COLOR* dst, const COLOR* src, u32 count, u32 bright) {
 
 void color_adj_brightness(int palette, int index, const COLOR* src, u32 count,
                           FIXED bright) {
-    color_adj_MEM_tng(&tng::palettes[palette / 16][palette % 16][index], src,
+    color_adj_MEM_tng(&tng::world->palettes[palette / 16][palette % 16][index], src,
                       count, bright);
 
 }
@@ -579,21 +532,21 @@ void clr_rgbscale(COLOR* dst, const COLOR* src, uint nclrs, COLOR clr) {
 }
 
 void clearTiles(int tileset, int index, int count) {
-    memset32_fast(&tng::bg_charblocks[tileset][index], 0, 8 * count);
+    memset32_fast(&tng::charblocks()[tileset][index], 0, 8 * count);
 
 }
 
 void clearTilemapEntries(int tilemap, int index, int count) {
-    u16* dst = tng::bg_screenblocks[tilemap];
+    u16* dst = tng::screenblocks()[tilemap];
     memset16(&dst[index], 0, count);
 
-    tng::bg_screenblock_fill_screen[tilemap] = false;
+    tng::world->bg_screenblock_fill_screen[tilemap] = false;
 
 }
 
 void setMosaic(int sx, int sy) {
-    tng::bg_mosaic_x = sx;
-    tng::bg_mosaic_y = sy;
+    tng::world->bg_mosaic_x = sx;
+    tng::world->bg_mosaic_y = sy;
 
 }
 
@@ -606,13 +559,13 @@ COLOR rgb8to5(u32* c) {
 }
 
 void savePalette(COLOR* dst) {
-    tng::palette_tng_to_gba((u16*)tng::palettes.data(), dst, 512);
+    tng::palette_tng_to_gba((u16*)tng::world->palettes.data(), dst, 512);
 
 }
 
 void color_fade_fast(int palette, int index, const COLOR* src, COLOR color,
                      int count, u32 alpha) {
-    u16* dst = &tng::palettes[palette / 16][palette % 16][index];
+    u16* dst = &tng::world->palettes[palette / 16][palette % 16][index];
     tng::palette_tng_to_gba(dst, dst, count);
     color_fade(dst, src, color, count, alpha);
     tng::palette_gba_to_tng(dst, dst, count);
@@ -621,7 +574,7 @@ void color_fade_fast(int palette, int index, const COLOR* src, COLOR color,
 
 void mirrorPalettes(int index, int count) {
     for (int i = index; i < 8 * 16; i++) {
-        tng::palettes_bg[i / 16][i % 16] = tng::palettes_sprite[i / 16][i % 16];
+        tng::world->palettes[tng::PALETTE_BG][i / 16][i % 16] = tng::world->palettes[tng::PALETTE_SPRITE][i / 16][i % 16];
     }
 
 }
@@ -631,22 +584,22 @@ void sprite_enable_blend(OBJ_ATTR* sprite) {
 
     int index = sprite - obj_buffer;
     assert(index >= 0 && index < 128);
-    tng::sprite_obj_dirty_flag[index] = true;
+    tng::world->sprite_obj_dirty_flag[index] = true;
 }
 
 void addColorToPalette(int palette, int index, COLOR color, int count) {
     for (int i = 0; i < count; i++) {
-        u16 c = tng::palettes[palette / 16][palette % 16][index + i];
+        u16 c = tng::world->palettes[palette / 16][palette % 16][index + i];
         c = tng::color_tng_to_gba(c);
         c += color;
         c = tng::color_gba_to_tng(c);
-        tng::palettes[palette / 16][palette % 16][index + i] = c;
+        tng::world->palettes[palette / 16][palette % 16][index + i] = c;
     }
 
 }
 
 void enableLayerWindow(int layer, int x1, int y1, int x2, int y2, bool invert) {
-    auto& window = cr::bg_clip_windows[layer];
+    auto& window = tng::world->bg_clip_windows[layer];
     window.left = x1;
     window.top = y1;
     window.right = x2;
@@ -657,12 +610,12 @@ void enableLayerWindow(int layer, int x1, int y1, int x2, int y2, bool invert) {
 }
 
 void disableLayerWindow(int layer) {
-    cr::bg_clip_windows[layer].enabled = false;
+    tng::world->bg_clip_windows[layer].enabled = false;
 
 }
 
 void setSpriteMaskRegion(int shift) {
-    auto& window = cr::sprites_clip_window;
+    auto& window = tng::world->sprites_clip_window;
     window.left = cr::SCENE_OFFSET_CENTERED.left;
     window.top = shift;
     window.right = cr::SCENE_OFFSET_CENTERED.right;
@@ -694,7 +647,7 @@ struct SpriteDraw {
 u8 spriteList[4][128];
 int spriteCount[4];
 
-inline bool windowAllows(const cr::ClipWindow& w, int x, int y) {
+inline bool windowAllows(const tng::ClipWindow& w, int x, int y) {
     if (!w.enabled)
         return true;
     const bool inside =
@@ -717,11 +670,11 @@ void buildSpriteLists() {
 }
 
 void drawBgLine(u16* line, int layer, int y) {
-    const tng::LayerInfo& li = layerInfo[layer];
-    const cr::ClipWindow& win = cr::bg_clip_windows[layer];
-    const u16* map = tng::bg_screenblocks[li.sbb];
-    const tng::ImageTile* tiles = &tng::bg_charblocks[li.cbb][0];
-    const auto& pals = tng::palettes_bg;
+    const tng::LayerInfo& li = tng::world->layers[layer];
+    const tng::ClipWindow& win = tng::world->bg_clip_windows[layer];
+    const u16* map = tng::screenblocks()[li.sbb];
+    const tng::ImageTile* tiles = &tng::charblocks()[li.cbb][0];
+    const auto& pals = tng::world->palettes[tng::PALETTE_BG];
 
     const int sy = (y + li.scroll_y) & 255;
     const int ty = sy >> 3;
@@ -756,10 +709,10 @@ void drawBgLine(u16* line, int layer, int y) {
 }
 
 void drawSpriteLine(u16* line, const OBJ_ATTR* s, int y) {
-    const u16* pal = tng::palettes_sprite[s->palette & 15].data();
+    const u16* pal = tng::world->palettes[tng::PALETTE_SPRITE][s->palette & 15].data();
     const int w = s->sx, h = s->sy;
     const int wt = w >> 3;
-    const cr::ClipWindow& win = cr::sprites_clip_window;
+    const tng::ClipWindow& win = tng::world->sprites_clip_window;
 
     if (!s->affine) {
         const int dy = y - s->y;
@@ -773,7 +726,7 @@ void drawSpriteLine(u16* line, const OBJ_ATTR* s, int y) {
                 continue;
             const int tx = s->flipx ? w - 1 - dx : dx;
             const tng::ImageTile& t =
-                tng::sprite_tile_images[(s->tile_start + (ty >> 3) * wt +
+                tng::world->sprite_tile_images[(s->tile_start + (ty >> 3) * wt +
                                          (tx >> 3)) &
                                         (tng::SPRITE_TILE_COUNT - 1)];
             const u32 c = (t.rows[ty & 7] >> ((tx & 7) * 4)) & 0xf;
@@ -816,7 +769,7 @@ void drawSpriteLine(u16* line, const OBJ_ATTR* s, int y) {
         if (s->flipy)
             ty = h - 1 - ty;
         const tng::ImageTile& t =
-            tng::sprite_tile_images[(s->tile_start + (ty >> 3) * wt +
+            tng::world->sprite_tile_images[(s->tile_start + (ty >> 3) * wt +
                                      (tx >> 3)) &
                                     (tng::SPRITE_TILE_COUNT - 1)];
         const u32 col = (t.rows[ty & 7] >> ((tx & 7) * 4)) & 0xf;
@@ -839,13 +792,13 @@ void ppuRenderFrame(void* dst, int strideBytes) {
 
         const u16 backdrop =
             gradientEnabled ? tng::color_gba_to_tng(gradientTable[y])
-                            : tng::palettes_bg[0][0];
+                            : tng::world->palettes[tng::PALETTE_BG][0][0];
         for (int x = 0; x < PPU_W; x++)
             line[x] = backdrop;
 
         for (int p = 3; p >= 0; p--) {
             for (int l = 3; l >= 0; l--) {
-                const tng::LayerInfo& li = layerInfo[l];
+                const tng::LayerInfo& li = tng::world->layers[l];
                 if (li.enabled && li.priority >= 0 &&
                     ((li.priority >> 4) & 3) == p)
                     drawBgLine(line, l, y);
@@ -940,7 +893,7 @@ void setScissor(Region r) {
 
 // Runs draw() once per rectangle the window lets through: the window itself,
 // or the up to four strips around it when inverted.
-template <typename F> void forEachWindowRect(const cr::ClipWindow& w, F draw) {
+template <typename F> void forEachWindowRect(const tng::ClipWindow& w, F draw) {
     const Region screen = {0, 0, PPU_W, PPU_H};
 
     if (!w.enabled) {
@@ -1025,9 +978,9 @@ inline void drawTile(const tng::ImageTile* tile, int palette, bool flipx,
 u32 layerBlocks[31 * 21];
 
 void drawBgLayer(int layer) {
-    const tng::LayerInfo& li = layerInfo[layer];
-    const u16* map = tng::bg_screenblocks[li.sbb];
-    const tng::ImageTile* tiles = &tng::bg_charblocks[li.cbb][0];
+    const tng::LayerInfo& li = tng::world->layers[layer];
+    const u16* map = tng::screenblocks()[li.sbb];
+    const tng::ImageTile* tiles = &tng::charblocks()[li.cbb][0];
     u8* tileState = &bgTileState[li.cbb * 512];
 
     const int sx = li.scroll_x & 255, sy = li.scroll_y & 255;
@@ -1060,7 +1013,7 @@ void drawBgLayer(int layer) {
         return;
     std::sort(layerBlocks, layerBlocks + count);
 
-    forEachWindowRect(cr::bg_clip_windows[layer], [&] {
+    forEachWindowRect(tng::world->bg_clip_windows[layer], [&] {
         for (int i = 0; i < count;) {
             const u32 key = layerBlocks[i];
             // the same run on the rows below
@@ -1101,7 +1054,7 @@ void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
             for (int srcX = 0; srcX < wt; srcX++) {
                 const int index = first + srcY * wt + srcX;
                 if (!tileEmptyCached(spriteTileState[index],
-                                     tng::sprite_tile_images[index])) {
+                                     tng::world->sprite_tile_images[index])) {
                     any = true;
                     break;
                 }
@@ -1111,7 +1064,7 @@ void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
             continue;
 
         const int count = (srcY1 - srcY0) * wt;
-        const u8* p = (const u8*)&tng::sprite_tile_images[first + srcY0 * wt];
+        const u8* p = (const u8*)&tng::world->sprite_tile_images[first + srcY0 * wt];
         if (imageBase == nullptr || p < imageBase ||
             p + count * 32 > imageBase + 4064) {
             imageBase = p;
@@ -1141,7 +1094,7 @@ void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
                 if (x >= PPU_W || x + 8 <= 0)
                     continue;
                 if (tileEmptyCached(spriteTileState[index],
-                                    tng::sprite_tile_images[index]))
+                                    tng::world->sprite_tile_images[index]))
                     continue;
 
                 // rows read backwards unless flipped, see drawTileBlock()
@@ -1176,7 +1129,7 @@ void drawSprite(const OBJ_ATTR* s) {
                 const int srcX = s->flipx ? wt - 1 - cx : cx;
                 const int index = (s->tile_start + srcY * wt + srcX) &
                                   (tng::SPRITE_TILE_COUNT - 1);
-                const tng::ImageTile* tile = &tng::sprite_tile_images[index];
+                const tng::ImageTile* tile = &tng::world->sprite_tile_images[index];
                 if (tileEmptyCached(spriteTileState[index], *tile))
                     continue;
                 drawTile(tile, s->palette & 15, s->flipx, s->flipy,
@@ -1205,13 +1158,13 @@ void drawSprite(const OBJ_ATTR* s) {
             plain.y += (rh - h) / 2;
             plain.flipx = s->flipx != (m[0] < 0);
             plain.flipy = s->flipy != (m[3] < 0);
-            forEachWindowRect(cr::sprites_clip_window, [&] { drawSprite(&plain); });
+            forEachWindowRect(tng::world->sprites_clip_window, [&] { drawSprite(&plain); });
             return;
         }
     }
 
     // the GBA only draws inside the render box
-    const cr::ClipWindow& win = cr::sprites_clip_window;
+    const tng::ClipWindow& win = tng::world->sprites_clip_window;
     Region box = {std::max(s->x, 0), std::max(s->y, 0), std::min(s->x + rw, PPU_W),
                   std::min(s->y + rh, PPU_H)};
     if (win.enabled && !win.invert) {
@@ -1230,7 +1183,7 @@ void drawSprite(const OBJ_ATTR* s) {
     for (int y = 0; y < h; y++) {
         for (int cx = 0; cx < wt; cx++) {
             const tng::ImageTile& t =
-                tng::sprite_tile_images[(s->tile_start + (y >> 3) * wt + cx) &
+                tng::world->sprite_tile_images[(s->tile_start + (y >> 3) * wt + cx) &
                                         (tng::SPRITE_TILE_COUNT - 1)];
             // GBA rows keep the left pixel in the lowest nibble, CI4 wants it
             // in the highest: reverse the order of the 8 nibbles
@@ -1324,7 +1277,7 @@ void drawSprites(int priority) {
             drawSprite(s);
             continue;
         }
-        forEachWindowRect(cr::sprites_clip_window, [&] { drawSprite(s); });
+        forEachWindowRect(tng::world->sprites_clip_window, [&] { drawSprite(s); });
     }
 }
 
@@ -1343,8 +1296,8 @@ void ppuRenderFrameRdp(int ox, int oy) {
     memset(spriteTileState, 0, sizeof(spriteTileState));
 
     buildSpriteLists();
-    buildTlut(tlutBg, tng::palettes_bg);
-    buildTlut(tlutSprite, tng::palettes_sprite);
+    buildTlut(tlutBg, tng::world->palettes[tng::PALETTE_BG]);
+    buildTlut(tlutSprite, tng::world->palettes[tng::PALETTE_SPRITE]);
     if (gradientEnabled) {
         for (int y = 0; y < PPU_H; y++) {
             const u16 c = tng::color_gba_to_tng(gradientTable[y]);
@@ -1367,7 +1320,7 @@ void ppuRenderFrameRdp(int ox, int oy) {
         rdpq_texture_rectangle_scaled(TILE_DRAW, ox, oy, ox + PPU_W, oy + PPU_H,
                                       0, 0, 0, PPU_H);
     } else {
-        rdpq_set_mode_fill(color_from_packed16(tng::palettes_bg[0][0]));
+        rdpq_set_mode_fill(color_from_packed16(tng::world->palettes[tng::PALETTE_BG][0][0]));
         rdpq_fill_rectangle(ox, oy, ox + PPU_W, oy + PPU_H);
         rdpq_set_mode_standard();
     }
@@ -1389,7 +1342,7 @@ void ppuRenderFrameRdp(int ox, int oy) {
 
     for (int p = 3; p >= 0; p--) {
         for (int l = 3; l >= 0; l--) {
-            const tng::LayerInfo& li = layerInfo[l];
+            const tng::LayerInfo& li = tng::world->layers[l];
             if (li.enabled && li.priority >= 0 && ((li.priority >> 4) & 3) == p) {
                 useTlut(tlutBg);
                 drawBgLayer(l);
