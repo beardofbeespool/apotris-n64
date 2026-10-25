@@ -383,41 +383,98 @@ void quit() {
 
 bool closed() { return true; }
 
+// Where a frame's time goes, in ticks
+struct FrameTimes {
+    uint32_t logic;     // game update, between frames
+    uint32_t game;      // the game's drawing calls (scene draw)
+    uint32_t build;     // the RDP commands for the picture
+    uint32_t rdp;       // waiting for the RDP to finish after that
+    uint32_t audio;     // the mixer
+};
+
+// The last second's figures, shown on screen with Settings > Video > Show
+// FPS (two lines of debug text)
+char perfLines[2][48];
+
+constexpr uint8_t PERF_FONT = 1;
+
 // Once a second, logs the frame rate and where the time goes (debugf, shown
 // by emulators and USB debug tools). Full speed is 60 frames per second, and
 // game logic plus drawing has to fit in a 16.7 ms frame.
-static void logFrameStats(uint32_t logicTicks, uint32_t drawTicks,
-                          uint32_t rdpWaitTicks, uint32_t latencyTicks) {
+static void logFrameStats(const FrameTimes& t, uint32_t latencyTicks) {
     static uint32_t secondStart = 0;
-    static uint32_t frames = 0, logicTotal = 0, drawTotal = 0, rdpTotal = 0,
-                    busyMax = 0, latencyTotal = 0;
+    static uint32_t frames = 0, busyMax = 0, latencyTotal = 0;
+    static FrameTimes total = {};
 
     uint32_t now = get_ticks();
     if (secondStart == 0)
         secondStart = now;
 
     frames++;
-    logicTotal += logicTicks;
-    drawTotal += drawTicks;
-    rdpTotal += rdpWaitTicks;
+    total.logic += t.logic;
+    total.game += t.game;
+    total.build += t.build;
+    total.rdp += t.rdp;
+    total.audio += t.audio;
     latencyTotal += latencyTicks;
-    if (logicTicks + drawTicks > busyMax)
-        busyMax = logicTicks + drawTicks;
+    const uint32_t busy = t.logic + t.game + t.build + t.rdp + t.audio;
+    if (busy > busyMax)
+        busyMax = busy;
 
     if (now - secondStart >= TICKS_PER_SECOND) {
-        debugf("fps %lu | logic %lu us | draw %lu us (waiting for RDP %lu us) "
-               "| busiest frame %lu us | input to screen %lu us | missed "
-               "vblanks %lu\n",
-               (unsigned long)frames,
-               (unsigned long)TICKS_TO_US(logicTotal / frames),
-               (unsigned long)TICKS_TO_US(drawTotal / frames),
-               (unsigned long)TICKS_TO_US(rdpTotal / frames),
-               (unsigned long)TICKS_TO_US(busyMax),
-               (unsigned long)TICKS_TO_US(latencyTotal / frames),
+        auto us = [&](uint32_t sum) {
+            return (unsigned long)TICKS_TO_US(sum / frames);
+        };
+        debugf("fps %lu | logic %lu us | game draw %lu us | build %lu us | "
+               "waiting for RDP %lu us | audio %lu us | busiest frame %lu us "
+               "| input to screen %lu us | missed vblanks %lu\n",
+               (unsigned long)frames, us(total.logic), us(total.game),
+               us(total.build), us(total.rdp), us(total.audio),
+               (unsigned long)TICKS_TO_US(busyMax), us(latencyTotal),
                (unsigned long)missedVblanks);
+
+        // in tenths of a millisecond
+        auto ms10 = [&](uint32_t sum) {
+            return (int)(TICKS_TO_US(sum / frames) / 100);
+        };
+        auto ms10max = (int)(TICKS_TO_US(busyMax) / 100);
+        snprintf(perfLines[0], sizeof(perfLines[0]), "%2lu FPS MAX %d.%d",
+                 (unsigned long)frames, ms10max / 10, ms10max % 10);
+        const int game = ms10(total.logic + total.game);
+        const int build = ms10(total.build), rdp = ms10(total.rdp),
+                  audio = ms10(total.audio);
+        snprintf(perfLines[1], sizeof(perfLines[1]),
+                 "G%d.%d B%d.%d R%d.%d A%d.%d", game / 10, game % 10,
+                 build / 10, build % 10, rdp / 10, rdp % 10, audio / 10,
+                 audio % 10);
+
         secondStart = now;
-        frames = logicTotal = drawTotal = rdpTotal = busyMax = latencyTotal = 0;
+        frames = busyMax = latencyTotal = 0;
+        total = {};
     }
+}
+
+// The figures above in the top-left corner of the framebuffer (rdpq
+// attached): G game, B building the picture, R waiting for the RDP, A audio,
+// all in milliseconds per frame, and MAX the busiest frame
+static void drawPerfOverlay(int w, int h, int x, int y) {
+    if (savefile == nullptr || !savefile->settings.showFPS ||
+        perfLines[0][0] == 0)
+        return;
+
+    static bool fontLoaded = false;
+    if (!fontLoaded) {
+        rdpq_text_register_font(PERF_FONT,
+                                rdpq_font_load_builtin(FONT_BUILTIN_DEBUG_MONO));
+        fontLoaded = true;
+    }
+
+    rdpq_set_scissor(0, 0, w, h);
+    rdpq_set_mode_fill(RGBA16(0, 0, 0, 1));
+    rdpq_fill_rectangle(x, y, x + 8 * 17 + 4, y + 2 * 10 + 2);
+    rdpq_set_mode_standard();
+    rdpq_text_print(NULL, PERF_FONT, x + 2, y + 9, perfLines[0]);
+    rdpq_text_print(NULL, PERF_FONT, x + 2, y + 19, perfLines[1]);
 }
 
 void vsync() {
@@ -425,10 +482,12 @@ void vsync() {
     static surface_t* framebuffer = nullptr;
     static uint32_t logicStart = 0;
 
+    FrameTimes times = {};
     uint32_t drawStart = get_ticks();
-    uint32_t logicTicks = logicStart ? drawStart - logicStart : 0;
+    times.logic = logicStart ? drawStart - logicStart : 0;
 
     onVBlank();
+    times.game = get_ticks() - drawStart;
 
     // The screen changes between single player and two-player, and with the
     // setting: hand back the framebuffer (blank) and start over
@@ -479,13 +538,21 @@ void vsync() {
         ppuRenderFrameRdp(ORIGIN_X, ORIGIN_Y);
         ppuRenderBoardCaps(ORIGIN_X, ORIGIN_Y, OUT_W, OUT_H);
     }
+    // top left, or in two-player centred above the timers
+    if (screen == Screen::FULL)
+        drawPerfOverlay(FULL_W, FULL_H, 4, 4);
+    else if (n64TwoPlayerActive())
+        drawPerfOverlay(OUT_W, OUT_H, (OUT_W - 140) / 2, 5);
+    else
+        drawPerfOverlay(OUT_W, OUT_H, 24, 16);
     rdpq_detach_show();
 #endif
     // the RDP reads the game's tile data straight from RAM, so the game
     // must not change it before the picture is finished
     uint32_t rdpWaitStart = get_ticks();
+    times.build = rdpWaitStart - drawStart - times.game;
     rspq_wait();
-    uint32_t rdpWaitTicks = get_ticks() - rdpWaitStart;
+    times.rdp = get_ticks() - rdpWaitStart;
 
 #ifndef APOTRIS_N64_CPU_PPU
     // the board caps' colours for the next frame, from this one
@@ -503,7 +570,9 @@ void vsync() {
 
     // Audio after the picture: the mixer runs on the RSP, which also passes
     // the drawing commands to the RDP, so mixing during drawing slows it down
+    const uint32_t audioStart = get_ticks();
     audioUpdate();
+    times.audio = get_ticks() - audioStart;
 
 #ifdef APOTRIS_N64_PPU_COMPARE
     compareWithCpu(framebuffer);
@@ -517,9 +586,8 @@ void vsync() {
     framebuffer = display_get();
     const uint32_t vblank = get_ticks();
 
-    logFrameStats(logicTicks, drawTicks, rdpWaitTicks,
-                  inputReadAt ? vblank - inputReadAt : 0);
-    readInputLate(vblank, logicTicks + drawTicks + inputReadTicks);
+    logFrameStats(times, inputReadAt ? vblank - inputReadAt : 0);
+    readInputLate(vblank, times.logic + drawTicks + inputReadTicks);
 
     logicStart = get_ticks();
 }
@@ -744,7 +812,13 @@ constexpr int MUSIC_CHANNEL = 0;        // stereo: uses channels 0 and 1
 constexpr int SFX_FIRST_CHANNEL = 2;
 constexpr int SFX_VOICES = 14;
 
-wav64_t sfxWaves[SFX_COUNT];
+wav64_t* sfxWaves[SFX_COUNT];
+
+// Effects up to this size (the frequent ones: moving, rotating, placing,
+// holding, clears, attacks, menus; about 360 KB in all) are kept in RAM.
+// Streaming costs a cartridge read for every playing voice every frame,
+// which adds up when both players are making noise.
+constexpr long SFX_PRELOAD_MAX = 32 * 1024;
 bool sfxLoaded[SFX_COUNT];
 int nextSfxVoice = 0;
 
@@ -804,7 +878,7 @@ float sfxVolume() {
 } // namespace
 
 void audioInit() {
-    audio_init(AUDIO_FREQUENCY, 4);
+    audio_init(AUDIO_FREQUENCY, AUDIO_INIT_LATENCY_MS(160));
     mixer_init(SFX_FIRST_CHANNEL + SFX_VOICES);
     wav64_init_compression(2);
 
@@ -816,9 +890,14 @@ void audioInit() {
         FILE* f = fopen(path.c_str(), "rb");
         if (f == nullptr)
             continue;
+        fseek(f, 0, SEEK_END);
+        const long size = ftell(f);
         fclose(f);
-        wav64_open(&sfxWaves[i], path.c_str());
-        sfxLoaded[i] = true;
+        wav64_loadparms_t parms = {};
+        parms.streaming_mode = size <= SFX_PRELOAD_MAX ? WAV64_STREAMING_NONE
+                                                       : WAV64_STREAMING_FULL;
+        sfxWaves[i] = wav64_load(path.c_str(), &parms);
+        sfxLoaded[i] = sfxWaves[i] != nullptr;
     }
 
     addSongs("rom:/music/");
@@ -834,6 +913,10 @@ void audioInit() {
     }
     debugf("audio: %d songs (%d menu, %d game)\n", (int)songFiles.size(),
            (int)songs.menu.size(), (int)songs.game.size());
+    heap_stats_t heap;
+    sys_get_heap_stats(&heap);
+    debugf("memory: %d KB of %d KB free\n", heap.free / 1024,
+           heap.total / 1024);
 }
 
 // Every frame: keep the audio buffers filled, and move on to the next song
@@ -855,10 +938,10 @@ void sfxRate(int n, float rate) {
         return;
     const int ch = SFX_FIRST_CHANNEL + nextSfxVoice;
     nextSfxVoice = (nextSfxVoice + 1) % SFX_VOICES;
-    wav64_play(&sfxWaves[n], ch);
+    wav64_play(sfxWaves[n], ch);
     mixer_ch_set_vol(ch, sfxVolume(), sfxVolume());
     if (rate != 1.0f)
-        mixer_ch_set_freq(ch, sfxWaves[n].wave.frequency * rate);
+        mixer_ch_set_freq(ch, sfxWaves[n]->wave.frequency * rate);
 }
 
 void sfx(int n) { sfxRate(n, 1.0f); }

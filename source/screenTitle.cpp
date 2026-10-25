@@ -439,11 +439,17 @@ void TitleScene::draw() {
     showSprites(128);
 
     const int y = 160 - (1) * 8;
-    versionText.show(0, y, 15);
-    nameText.show(240 - nameText.width, y, 15);
+#ifdef APOTRIS_N64
+    // flush with the screen edges they fall into a CRT's overscan
+    const int inset = 8;
+#else
+    const int inset = 0;
+#endif
+    versionText.show(inset, y, 15);
+    nameText.show(240 - inset - nameText.width, y, 15);
 
 #ifndef NO_DIAGNOSE
-    wordSprites[2].show(0, y - 8, 15);
+    wordSprites[2].show(inset, y - 8, 15);
 #endif
 
     if (flashTimer < flashMax / 2) {

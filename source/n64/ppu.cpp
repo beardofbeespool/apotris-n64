@@ -19,6 +19,7 @@
 #include <libdragon.h>
 
 // Tiling Next Gen
+
 namespace tng {
 
 constexpr u16 color_rgb5a1_unsafe(u8 c_r, u8 c_g, u8 c_b, u8 c_a = 1) {
@@ -662,6 +663,13 @@ struct SpriteDraw {
 u8 spriteList[4][128];
 int spriteCount[4];
 
+// Each listed sprite's box on the GBA screen (the render box for affine
+// ones), so a region can skip the sprites outside it without reading them
+struct SpriteBox {
+    s16 x0, y0, x1, y1;
+};
+SpriteBox spriteBoxes[4][128];
+
 inline bool windowAllows(const tng::ClipWindow& w, int x, int y) {
     if (!w.enabled)
         return true;
@@ -680,6 +688,10 @@ void buildSpriteLists() {
         if (!s->enabled || s->sx <= 0 || s->sy <= 0)
             continue;
         int p = (s->priority >> 4) & 3;
+        const int scale = s->affine && s->doubleSize ? 2 : 1;
+        spriteBoxes[p][spriteCount[p]] = {
+            (s16)s->x, (s16)s->y, (s16)(s->x + s->sx * scale),
+            (s16)(s->y + s->sy * scale)};
         spriteList[p][spriteCount[p]++] = i;
     }
 }
@@ -854,17 +866,24 @@ u16* tlutSprite = tlutSprites[0];
 // while none of its tiles has been written (sprite_tile_version), and is only
 // replaced in a later frame, after the RDP has read it.
 constexpr int AFFINE_MAX_BYTES = 64 * 64 / 2;
-constexpr int AFFINE_CACHE_SIZE = 24;
+// a frame needs about 25 per player: every sprite of more than one tile
+// goes through here too (see drawSpriteLinear())
+constexpr int AFFINE_CACHE_SIZE = 64;
 
 struct AffineImage {
-    const tng::World* world = nullptr;
-    int tileStart = -1, w = 0, h = 0;
+    int world = -1, tileStart = -1, w = 0, h = 0;
     u32 version = 0;
     u32 lastUsed = 0;
-    alignas(16) u8 pixels[AFFINE_MAX_BYTES];
 };
 
+// The entries are looked up for every sprite drawn, so they are kept apart
+// from the pixels (one cache line for all of them, rather than one each),
+// and found through the sprite's first tile
 AffineImage affineCache[AFFINE_CACHE_SIZE];
+alignas(16) u8 affinePixels[AFFINE_CACHE_SIZE][AFFINE_MAX_BYTES];
+s8 affineSlot[tng::WORLD_COUNT][tng::SPRITE_TILE_COUNT];
+bool affineSlotsReady = false;
+
 u32 affineFrame = 1;
 
 struct Region {
@@ -879,6 +898,15 @@ int originX, originY;
 const u8* imageBase;          // texture image the tiles are loaded from
 const void* lastLoaded;       // tile currently in TMEM
 int drawPalette;              // palette set on TILE_DRAW, -1 if unknown
+
+// Multi-tile sprites drawn as one rectangle (drawSpriteLinear()) load and
+// draw through tile descriptors of their own; what they are set to, -1 when
+// unknown
+constexpr rdpq_tile_t TILE_LINEAR_LOAD = TILE4;
+constexpr rdpq_tile_t TILE_LINEAR = TILE5;
+struct {
+    int loadPitch, pitch, palette, w, h;
+} linear = {-1, -1, -1, -1, -1};
 
 void resetRdpState() {
     imageBase = nullptr;
@@ -1018,10 +1046,19 @@ void drawTileBlock(const tng::ImageTile* tile, int palette, bool flipx,
     // tile is therefore read with s counting down, a flipped one counting up;
     // half a texel keeps the point sampling inside the right texel.
     const int pw = w * 8, ph = h * 8;
+    const int fx = originX + x, fy = originY + y;
+    if (fx >= 0 && fy >= 0) {
+        // fixed point (pixels in 1/4, texels in 1/32, steps in 1/1024),
+        // without the general helper's float conversions and divisions
+        __rdpq_texture_rectangle_raw_fx(
+            TILE_DRAW, fx * 4, fy * 4, (fx + pw) * 4, (fy + ph) * 4,
+            flipx ? 0 : pw * 32 - 16, flipy ? ph * 32 - 16 : 0,
+            flipx ? 1024 : -1024, flipy ? -1024 : 1024);
+        return;
+    }
     const float s0 = flipx ? 0.0f : pw - 0.5f;
     const float t0 = flipy ? ph - 0.5f : 0.0f;
-    rdpq_texture_rectangle_scaled(TILE_DRAW, originX + x, originY + y,
-                                  originX + x + pw, originY + y + ph, s0, t0,
+    rdpq_texture_rectangle_scaled(TILE_DRAW, fx, fy, fx + pw, fy + ph, s0, t0,
                                   flipx ? s0 + pw : s0 - pw,
                                   flipy ? t0 - ph : t0 + ph);
 }
@@ -1179,36 +1216,47 @@ void drawSpriteTiles(const OBJ_ATTR* s, int first, int wt, int ht) {
 const u8* affineImage(const OBJ_ATTR* s, int w, int h, int pitch) {
     const int wt = w >> 3, ht = h >> 3;
     const int first = s->tile_start & (tng::SPRITE_TILE_COUNT - 1);
+    const int world = ppuCurrentWorld();
+
+    if (!affineSlotsReady) {
+        memset(affineSlot, -1, sizeof(affineSlot));
+        affineSlotsReady = true;
+    }
 
     u32 version = 0;
     for (int i = 0; i < wt * ht; i++)
         version += tng::world->sprite_tile_version[(first + i) &
                                                    (tng::SPRITE_TILE_COUNT - 1)];
 
-    AffineImage* slot = nullptr;
-    for (AffineImage& entry : affineCache) {
-        if (entry.world == tng::world && entry.tileStart == first &&
-            entry.w == w && entry.h == h) {
-            slot = &entry;
-            break;
+    int index = affineSlot[world][first];
+    if (index >= 0) {
+        AffineImage& entry = affineCache[index];
+        if (entry.w == w && entry.h == h && entry.version == version) {
+            entry.lastUsed = affineFrame;
+            return affinePixels[index];
         }
-    }
-    if (slot && slot->version == version) {
-        slot->lastUsed = affineFrame;
-        return slot->pixels;
+        // the same tiles at another size, or changed: convert again
+        if (entry.lastUsed == affineFrame && (entry.w != w || entry.h != h))
+            index = -1;
     }
 
-    if (slot == nullptr) {
+    if (index < 0) {
         // the least recently used entry not needed this frame
-        for (AffineImage& entry : affineCache) {
+        for (int i = 0; i < AFFINE_CACHE_SIZE; i++) {
+            const AffineImage& entry = affineCache[i];
             if (entry.lastUsed != affineFrame &&
-                (slot == nullptr || entry.lastUsed < slot->lastUsed))
-                slot = &entry;
+                (index < 0 || entry.lastUsed < affineCache[index].lastUsed))
+                index = i;
         }
-        if (slot == nullptr)
+        if (index < 0)
             return nullptr;
     }
 
+    AffineImage& slot = affineCache[index];
+    if (slot.tileStart >= 0 && affineSlot[slot.world][slot.tileStart] == index)
+        affineSlot[slot.world][slot.tileStart] = -1;
+
+    u8* pixels = affinePixels[index];
     for (int y = 0; y < h; y++) {
         for (int cx = 0; cx < wt; cx++) {
             const tng::ImageTile& t =
@@ -1218,18 +1266,75 @@ const u8* affineImage(const OBJ_ATTR* s, int w, int h, int pitch) {
             // in the highest: reverse the order of the 8 nibbles
             u32 row = t.rows[y & 7];
             row = ((row >> 4) & 0x0f0f0f0f) | ((row & 0x0f0f0f0f) << 4);
-            *(u32*)(slot->pixels + y * pitch + cx * 4) = __builtin_bswap32(row);
+            *(u32*)(pixels + y * pitch + cx * 4) = __builtin_bswap32(row);
         }
     }
-    data_cache_hit_writeback(slot->pixels, pitch * h);
+    data_cache_hit_writeback(pixels, pitch * h);
 
-    slot->world = tng::world;
-    slot->tileStart = first;
-    slot->w = w;
-    slot->h = h;
-    slot->version = version;
-    slot->lastUsed = affineFrame;
-    return slot->pixels;
+    slot.world = world;
+    slot.tileStart = first;
+    slot.w = w;
+    slot.h = h;
+    slot.version = version;
+    slot.lastUsed = affineFrame;
+    affineSlot[world][first] = index;
+    return pixels;
+}
+
+// A plain sprite of several tiles as one rectangle, from the linear copy the
+// affine sprites use (cached between frames, see affineImage()), instead of
+// a rectangle per tile: far fewer commands to build and for the RDP to run.
+// False if there was no room in the cache.
+bool drawSpriteLinear(const OBJ_ATTR* s, int w, int h) {
+    const int pitch = std::max(w / 2, 8);
+    const u8* image = affineImage(s, w, h, pitch);
+    if (image == nullptr)
+        return false;
+
+    // Tile descriptors of its own, set only when the size or palette changes
+    // (most sprites are 32x32): usually an image, a load and a rectangle
+    ensureTlut();
+    rdpq_set_texture_image_raw(0, PhysicalAddr(image), FMT_CI8, pitch, h);
+    if (linear.loadPitch != pitch) {
+        rdpq_set_tile(TILE_LINEAR_LOAD, FMT_CI8, 0, pitch, NULL);
+        linear.loadPitch = pitch;
+    }
+    rdpq_load_tile(TILE_LINEAR_LOAD, 0, 0, pitch, h);
+    // the texture image and TMEM no longer hold what the tile paths loaded
+    imageBase = nullptr;
+    lastLoaded = nullptr;
+
+    const int palette = s->palette & 15;
+    if (linear.pitch != pitch || linear.palette != palette) {
+        rdpq_tileparms_t parms = {};
+        parms.palette = (uint8_t)palette;
+        rdpq_set_tile(TILE_LINEAR, FMT_CI4, 0, pitch, &parms);
+        linear.pitch = pitch;
+        linear.palette = palette;
+    }
+    if (linear.w != w || linear.h != h) {
+        rdpq_set_tile_size(TILE_LINEAR, 0, 0, w, h);
+        linear.w = w;
+        linear.h = h;
+    }
+
+    // straight, or read backwards from the far edge when flipped (as the
+    // tiles are drawn, see drawSpriteTiles())
+    const int x = originX + s->x, y = originY + s->y;
+    if (x >= 0 && y >= 0) {
+        // fixed point (pixels in 1/4, texels in 1/32, steps in 1/1024),
+        // without the general helper's divisions
+        __rdpq_texture_rectangle_raw_fx(
+            TILE_LINEAR, x * 4, y * 4, (x + w) * 4, (y + h) * 4,
+            s->flipx ? w * 32 - 16 : 0, s->flipy ? h * 32 - 16 : 0,
+            s->flipx ? -1024 : 1024, s->flipy ? -1024 : 1024);
+    } else {
+        const float s0 = s->flipx ? w - 0.5f : 0.0f, s1 = s->flipx ? -0.5f : w;
+        const float t0 = s->flipy ? h - 0.5f : 0.0f, t1 = s->flipy ? -0.5f : h;
+        rdpq_texture_rectangle_scaled(TILE_LINEAR, x, y, x + w, y + h, s0, t0,
+                                      s1, t1);
+    }
+    return true;
 }
 
 void drawSprite(const OBJ_ATTR* s) {
@@ -1241,6 +1346,10 @@ void drawSprite(const OBJ_ATTR* s) {
             s->y + h <= view.y0)
             return;
         const int first = s->tile_start & (tng::SPRITE_TILE_COUNT - 1);
+        if (wt * ht > 1 && w <= 64 && h <= 64 &&
+            first + wt * ht <= (int)tng::SPRITE_TILE_COUNT &&
+            drawSpriteLinear(s, w, h))
+            return;
         if (first + wt * ht <= (int)tng::SPRITE_TILE_COUNT) {
             drawSpriteTiles(s, first, wt, ht);
             return;
@@ -1387,6 +1496,10 @@ void drawSprite(const OBJ_ATTR* s) {
 
 void drawSprites(int priority) {
     for (int i = 0; i < spriteCount[priority]; i++) {
+        const SpriteBox& box = spriteBoxes[priority][i];
+        if (box.x0 >= view.x1 || box.x1 <= view.x0 || box.y0 >= view.y1 ||
+            box.y1 <= view.y0)
+            continue;
         const OBJ_ATTR* s = &obj_buffer[spriteList[priority][i]];
         if (s->affine) {
             drawSprite(s);
@@ -1430,8 +1543,18 @@ void ppuPrepareWorld() {
 
     // Everything the RDP reads (tiles, palettes, the gradient) has to be in
     // RAM, not just in the CPU cache. Flushing the whole 8 KB cache is far
-    // quicker than walking the 96 KB of tile memory line by line.
-    data_cache_writeback_invalidate_all();
+    // quicker than walking the 96 KB of tile memory line by line. Once per
+    // frame: the game has drawn into every world by now, and later worlds
+    // only need what this prepares written back.
+    if (tng::world == &tng::worlds[0]) {
+        data_cache_writeback_invalidate_all();
+    } else {
+        data_cache_hit_writeback(tlutBg, 256 * sizeof(u16));
+        data_cache_hit_writeback(tlutSprite, 256 * sizeof(u16));
+        data_cache_hit_writeback(gradientTexture, PPU_H * 4 * sizeof(u16));
+    }
+    // the descriptors are set from scratch every frame
+    linear = {-1, -1, -1, -1, -1};
 
     // the palettes were rebuilt for this world
     loadedTlut = nullptr;

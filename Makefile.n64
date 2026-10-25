@@ -34,8 +34,12 @@ OBJS = $(SRC_CPP:%.cpp=$(BUILD_DIR)/%.o) $(SRC_C:%.c=$(BUILD_DIR)/%.o) \
 # Extra defines, e.g. make -f Makefile.n64 APOTRIS_FLAGS=-DAPOTRIS_N64_PPU_COMPARE
 APOTRIS_FLAGS ?=
 
-N64_CXXFLAGS += $(APOTRIS_FLAGS) -DAPOTRIS_N64 -Iinclude/n64/compat -Iinclude -Idata -Igen -w -fno-exceptions
-N64_CFLAGS += -DAPOTRIS_N64 -Iinclude -Igen -w
+# NO_DIAGNOSE: a release build, as the other platforms' release builds are.
+# Without it the game runs its debug behaviour (a full Zone meter after every
+# piece, replays padded to the memory limit, a test QR screen in the pause
+# menu, "DEBUG BUILD" on the title screen).
+N64_CXXFLAGS += $(APOTRIS_FLAGS) -DAPOTRIS_N64 -DNO_DIAGNOSE -Iinclude/n64/compat -Iinclude -Idata -Igen -w -fno-exceptions
+N64_CFLAGS += -DAPOTRIS_N64 -DNO_DIAGNOSE -Iinclude -Igen -w
 N64_ASFLAGS += -DAPOTRIS_N64
 
 all: $(NAME).z64
